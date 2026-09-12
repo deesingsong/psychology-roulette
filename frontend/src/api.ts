@@ -52,6 +52,12 @@ export const api = {
       body: JSON.stringify({ player_id: playerId, position, confidence }),
     });
   },
+  submitModifier(code: string, playerId: string, value: number | string) {
+    return request<RoomView>(`/api/rooms/${code}/modifier-submissions`, {
+      method: "POST",
+      body: JSON.stringify({ player_id: playerId, value }),
+    });
+  },
   reveal(code: string, playerId: string) {
     return request<RoomView>(`/api/rooms/${code}/reveal`, {
       method: "POST",

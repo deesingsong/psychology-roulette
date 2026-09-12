@@ -21,7 +21,11 @@ class RoomStore:
             for _ in range(50):
                 code = "".join(secrets.choice(ROOM_ALPHABET) for _ in range(4))
                 if code not in self._rooms:
-                    room = Room(code=code, questions=load_questions())
+                    room = Room(
+                        code=code,
+                        questions=load_questions(),
+                        modifier_seed=secrets.token_hex(32),
+                    )
                     self._rooms[code] = room
                     return room
         raise RuntimeError("Could not allocate a unique room code.")

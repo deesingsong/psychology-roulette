@@ -536,6 +536,147 @@ footer {
   margin-top: 10px;
   font: 700 1.7rem "Manrope";
 }
+.modifier-stage {
+  max-width: 820px;
+}
+.modifier-heading {
+  position: relative;
+  padding: 30px 0 10px;
+}
+.modifier-heading h1 {
+  margin-top: 20px;
+  color: var(--ink);
+}
+.modifier-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 7px 11px;
+  border: 1px solid rgba(156, 124, 255, 0.45);
+  border-radius: 999px;
+  background: rgba(156, 124, 255, 0.12);
+  color: #c4b2ff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.modifier-wait {
+  border-color: rgba(156, 124, 255, 0.32);
+}
+.violet-pulse {
+  background: var(--violet);
+  box-shadow: 0 0 0 8px rgba(156, 124, 255, 0.08);
+}
+.modifier-input {
+  border-color: rgba(156, 124, 255, 0.3);
+}
+.modifier-question {
+  margin: 8px 0 18px;
+  padding: 18px 20px;
+  border-left: 3px solid var(--coral);
+  background: rgba(255, 111, 97, 0.07);
+}
+.modifier-question span {
+  color: var(--coral-light);
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.modifier-question p {
+  margin: 8px 0 0;
+  font: 600 1rem/1.5 "Manrope";
+}
+.principle-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-bottom: 24px;
+}
+.principle {
+  min-height: 86px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: #1b1920;
+  color: var(--muted);
+  font-weight: 700;
+  text-transform: capitalize;
+  cursor: pointer;
+  transition:
+    transform 0.15s,
+    border-color 0.15s,
+    background 0.15s;
+}
+.principle:hover {
+  transform: translateY(-2px);
+  border-color: var(--violet);
+}
+.principle.active {
+  border-color: var(--violet);
+  background: rgba(156, 124, 255, 0.14);
+  color: var(--ink);
+}
+.reveal-modifier {
+  margin: 30px 0;
+  padding: 24px;
+  border: 1px solid rgba(156, 124, 255, 0.34);
+  border-radius: 18px;
+  background:
+    radial-gradient(
+      circle at 100% 0%,
+      rgba(156, 124, 255, 0.16),
+      transparent 15rem
+    ),
+    var(--panel);
+}
+.reveal-modifier h2 {
+  margin: 18px 0 8px;
+}
+.reveal-modifier > p {
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: 1.05rem;
+  line-height: 1.6;
+}
+.devil-card {
+  border-color: rgba(255, 111, 97, 0.44);
+  background:
+    radial-gradient(
+      circle at 100% 0%,
+      rgba(255, 111, 97, 0.16),
+      transparent 15rem
+    ),
+    var(--panel);
+}
+.devil-card .modifier-badge {
+  border-color: rgba(255, 111, 97, 0.45);
+  background: rgba(255, 111, 97, 0.1);
+  color: var(--coral-light);
+}
+.modifier-result-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 9px;
+  margin-top: 18px;
+}
+.modifier-result-grid > div {
+  display: grid;
+  gap: 5px;
+  padding: 14px;
+  border-radius: 12px;
+  background: rgba(24, 22, 29, 0.72);
+}
+.modifier-result-grid strong {
+  font-size: 0.76rem;
+}
+.modifier-result-grid span {
+  color: var(--violet);
+  font-weight: 700;
+  text-transform: capitalize;
+}
+.modifier-result-grid small {
+  color: var(--acid);
+}
 .discussion-card {
   margin: 16px 0;
   padding: 22px;
@@ -599,20 +740,23 @@ footer {
     grid-template-columns: repeat(2, 1fr);
   }
   .position-grid {
-    grid-template-columns: repeat(7, minmax(42px, 1fr));
-    overflow-x: auto;
-    padding-bottom: 8px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
   .position {
     min-height: 80px;
   }
   .position span {
-    display: none;
+    display: block;
+    font-size: 0.55rem;
   }
   .answer-panel {
     padding: 18px 12px;
   }
   .stat-grid {
+    grid-template-columns: 1fr;
+  }
+  .principle-grid,
+  .modifier-result-grid {
     grid-template-columns: 1fr;
   }
   .reveal-axis {

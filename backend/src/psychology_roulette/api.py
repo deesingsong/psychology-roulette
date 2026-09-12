@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt, StrictStr
 
-from psychology_roulette.domain import GameError, Room, RoomPhase
+from psychology_roulette.domain import (
+    GameError,
+    ModifierTiming,
+    ModifierType,
+    Room,
+    RoomPhase,
+)
 from psychology_roulette.store import RoomStore, default_store
 
 
@@ -25,10 +31,15 @@ class SubmitAnswerRequest(PlayerActionRequest):
     confidence: int = Field(ge=0, le=100)
 
 
+class SubmitModifierRequest(PlayerActionRequest):
+    value: StrictInt | StrictStr
+
+
 class PlayerView(BaseModel):
     name: str
     is_host: bool
     has_answered: bool
+    has_modifier_submitted: bool
 
 
 class QuestionView(BaseModel):
@@ -45,6 +56,24 @@ class RevealedAnswerView(BaseModel):
     confidence: int
 
 
+class ModifierResultView(BaseModel):
+    player_name: str
+    value: int | str
+    score: int | None = None
+
+
+class ModifierView(BaseModel):
+    type: ModifierType
+    timing: ModifierTiming
+    title: str
+    instructions: str
+    target_player_name: str | None
+    options: list[int | str]
+    submissions_count: int
+    required_submissions: int
+    results: list[ModifierResultView] | None
+
+
 class RoomView(BaseModel):
     code: str
     phase: RoomPhase
@@ -54,6 +83,7 @@ class RoomView(BaseModel):
     question: QuestionView | None
     revealed_answers: list[RevealedAnswerView] | None
     summary: dict[str, float | int] | None
+    modifier: ModifierView | None
 
 
 class RoomSessionView(BaseModel):
@@ -86,6 +116,47 @@ def room_view(room: Room) -> RoomView:
             values=list(current_round.question.values),
         )
 
+    modifier_view = None
+    if (
+        current_round
+        and current_round.modifier
+        and room.phase
+        in {
+            RoomPhase.MODIFIER,
+            RoomPhase.REVEAL,
+            RoomPhase.COMPLETE,
+        }
+    ):
+        modifier = current_round.modifier
+        results = None
+        if answers_visible:
+            results = [
+                ModifierResultView(
+                    player_name=room.players[player_id].name,
+                    value=modifier.results[player_id].value,
+                    score=modifier.results[player_id].score,
+                )
+                for player_id in room.players
+                if player_id in modifier.results
+            ]
+        modifier_view = ModifierView(
+            type=modifier.type,
+            timing=modifier.timing,
+            title=modifier.title,
+            instructions=modifier.instructions,
+            target_player_name=(
+                room.players[modifier.target_player_id].name
+                if modifier.target_player_id is not None
+                else None
+            ),
+            options=list(modifier.options),
+            submissions_count=len(modifier.submissions),
+            required_submissions=(
+                len(room.players) if modifier.timing is ModifierTiming.PRE_REVEAL else 0
+            ),
+            results=results,
+        )
+
     return RoomView(
         code=room.code,
         phase=room.phase,
@@ -94,6 +165,11 @@ def room_view(room: Room) -> RoomView:
                 name=player.name,
                 is_host=player.is_host,
                 has_answered=bool(current_round and player.id in current_round.answers),
+                has_modifier_submitted=bool(
+                    current_round
+                    and current_round.modifier
+                    and player.id in current_round.modifier.submissions
+                ),
             )
             for player in room.players.values()
         ],
@@ -102,6 +178,7 @@ def room_view(room: Room) -> RoomView:
         question=question,
         revealed_answers=revealed_answers,
         summary=room.round_summary(),
+        modifier=modifier_view,
     )
 
 
@@ -162,6 +239,12 @@ def create_app(store: RoomStore | None = None) -> FastAPI:
             position=request.position,
             confidence=request.confidence,
         )
+        return room_view(room)
+
+    @app.post("/api/rooms/{code}/modifier-submissions", response_model=RoomView)
+    def submit_modifier(code: str, request: SubmitModifierRequest) -> RoomView:
+        room = active_store.get(code)
+        room.submit_modifier(player_id=request.player_id, value=request.value)
         return room_view(room)
 
     @app.post("/api/rooms/{code}/reveal", response_model=RoomView)

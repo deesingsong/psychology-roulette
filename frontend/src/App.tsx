@@ -1,4 +1,11 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { api } from "./api";
 import type { RoomView, Session } from "./types";
 
@@ -111,16 +118,17 @@ function Landing({ onSession }: LandingProps) {
     event.preventDefault();
     setBusy(true);
     setError(null);
+    const normalizedName = name.trim().replace(/\s+/g, " ");
     try {
       const result =
         mode === "create"
-          ? await api.createRoom(name)
-          : await api.joinRoom(code.trim().toUpperCase(), name);
+          ? await api.createRoom(normalizedName)
+          : await api.joinRoom(code.trim().toUpperCase(), normalizedName);
       onSession(
         {
           roomCode: result.room.code,
           playerId: result.player_id,
-          playerName: name.trim(),
+          playerName: normalizedName,
           isHost: mode === "create",
         },
         result.room,
@@ -236,7 +244,13 @@ interface GameProps {
 }
 
 function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
+  const [pending, setPending] = useState(false);
+  const pendingRef = useRef(false);
+
   const act = async (request: () => Promise<RoomView>) => {
+    if (pendingRef.current) return;
+    pendingRef.current = true;
+    setPending(true);
     onError(null);
     try {
       onRoom(await request());
@@ -244,6 +258,9 @@ function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
       onError(
         reason instanceof Error ? reason.message : "That action did not work.",
       );
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
     }
   };
 
@@ -268,6 +285,7 @@ function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
         <Lobby
           room={room}
           isHost={session.isHost}
+          pending={pending}
           onStart={() => act(() => api.startRoom(room.code, session.playerId))}
         />
       )}
@@ -276,6 +294,7 @@ function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
           key={room.round_number}
           session={session}
           room={room}
+          pending={pending}
           onSubmit={(position, confidence) =>
             act(() =>
               api.submitAnswer(
@@ -289,10 +308,23 @@ function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
           onReveal={() => act(() => api.reveal(room.code, session.playerId))}
         />
       )}
+      {room.phase === "modifier" && (
+        <ModifierStage
+          key={room.round_number}
+          session={session}
+          room={room}
+          pending={pending}
+          onSubmit={(value) =>
+            act(() => api.submitModifier(room.code, session.playerId, value))
+          }
+          onReveal={() => act(() => api.reveal(room.code, session.playerId))}
+        />
+      )}
       {room.phase === "reveal" && (
         <Reveal
           room={room}
           isHost={session.isHost}
+          pending={pending}
           onAdvance={() => act(() => api.advance(room.code, session.playerId))}
         />
       )}
@@ -308,10 +340,12 @@ function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
 function Lobby({
   room,
   isHost,
+  pending,
   onStart,
 }: {
   room: RoomView;
   isHost: boolean;
+  pending: boolean;
   onStart: () => void;
 }) {
   return (
@@ -344,7 +378,7 @@ function Lobby({
       {isHost ? (
         <button
           className="button primary wide"
-          disabled={room.players.length < 2}
+          disabled={room.players.length < 2 || pending}
           onClick={onStart}
         >
           Begin the game
@@ -361,11 +395,13 @@ function Lobby({
 function Answering({
   session,
   room,
+  pending,
   onSubmit,
   onReveal,
 }: {
   session: Session;
   room: RoomView;
+  pending: boolean;
   onSubmit: (position: number, confidence: number) => void;
   onReveal: () => void;
 }) {
@@ -394,7 +430,11 @@ function Answering({
             {room.players.length} minds are in.
           </p>
           {session.isHost && everyoneAnswered && (
-            <button className="button primary" onClick={onReveal}>
+            <button
+              className="button primary"
+              disabled={pending}
+              onClick={onReveal}
+            >
               Reveal the room
             </button>
           )}
@@ -414,6 +454,9 @@ function Answering({
                 key={option.value}
                 onClick={() => setPosition(option.value)}
                 title={option.short}
+                aria-label={option.short}
+                aria-pressed={position === option.value}
+                disabled={pending}
               >
                 <strong>{option.mark}</strong>
                 <span>{option.short}</span>
@@ -430,11 +473,12 @@ function Answering({
               step="10"
               value={confidence}
               onChange={(event) => setConfidence(Number(event.target.value))}
+              disabled={pending}
             />
           </label>
           <button
             className="button primary wide"
-            disabled={position === null}
+            disabled={position === null || pending}
             onClick={() => position !== null && onSubmit(position, confidence)}
           >
             Lock my position
@@ -461,13 +505,168 @@ function SubmissionRail({ room }: { room: RoomView }) {
   );
 }
 
+function ModifierStage({
+  session,
+  room,
+  pending,
+  onSubmit,
+  onReveal,
+}: {
+  session: Session;
+  room: RoomView;
+  pending: boolean;
+  onSubmit: (value: number | string) => void;
+  onReveal: () => void;
+}) {
+  const [value, setValue] = useState<number | string | null>(null);
+  const modifier = room.modifier;
+  const me = room.players.find((player) => player.name === session.playerName);
+  const everyoneSubmitted =
+    modifier !== null &&
+    modifier.submissions_count >= modifier.required_submissions;
+
+  if (!modifier) {
+    return (
+      <section className="stage modifier-stage">
+        <p className="eyebrow">THE WHEEL IS TURNING</p>
+        <h1>Preparing the challenge…</h1>
+      </section>
+    );
+  }
+
+  const predictionOptions = modifier.options
+    .filter((option): option is number => typeof option === "number")
+    .map(
+      (option) =>
+        POSITIONS.find((position) => position.value === option) ?? {
+          value: option,
+          short: formatPosition(option),
+          mark: formatPosition(option),
+        },
+    );
+  const principleOptions = modifier.options.filter(
+    (option): option is string => typeof option === "string",
+  );
+
+  return (
+    <section className="stage modifier-stage">
+      <div className="modifier-heading">
+        <span className="modifier-badge">OCCASIONAL MODIFIER</span>
+        <p className="eyebrow">ROUND {room.round_number}</p>
+        <h1>{modifier.title}</h1>
+        <p className="lede">{modifier.instructions}</p>
+      </div>
+      <div className="modifier-question">
+        <span>THE QUESTION</span>
+        <p>{room.question?.prompt}</p>
+      </div>
+
+      {me?.has_modifier_submitted ? (
+        <div className="submitted-panel modifier-wait">
+          <span className="pulse violet-pulse" />
+          <h2>Choice locked.</h2>
+          <p>
+            {modifier.submissions_count} of {modifier.required_submissions}{" "}
+            minds are in.
+          </p>
+          {session.isHost && everyoneSubmitted && (
+            <button
+              className="button primary"
+              disabled={pending}
+              onClick={onReveal}
+            >
+              Reveal the room
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="answer-panel modifier-input">
+          {modifier.type === "predict_room" && (
+            <>
+              <div className="scale-labels">
+                <span>ROOM DISAGREES</span>
+                <span>ROOM AGREES</span>
+              </div>
+              {predictionOptions.length === 0 && (
+                <p className="error">
+                  No valid prediction options are available.
+                </p>
+              )}
+              <div className="position-grid">
+                {predictionOptions.map((option) => (
+                  <button
+                    className={
+                      value === option.value ? "position active" : "position"
+                    }
+                    key={option.value}
+                    onClick={() => setValue(option.value)}
+                    title={option.short}
+                    aria-label={option.short}
+                    aria-pressed={value === option.value}
+                    disabled={pending}
+                  >
+                    <strong>{option.mark}</strong>
+                    <span>{option.short}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {modifier.type === "secret_principle" && (
+            <div className="principle-grid">
+              {principleOptions.length === 0 && (
+                <p className="error">No valid principles are available.</p>
+              )}
+              {principleOptions.map((option) => (
+                <button
+                  className={
+                    value === option ? "principle active" : "principle"
+                  }
+                  key={option}
+                  onClick={() => setValue(option)}
+                  aria-pressed={value === option}
+                  disabled={pending}
+                >
+                  {option.replaceAll("_", " ")}
+                </button>
+              ))}
+            </div>
+          )}
+
+          <button
+            className="button primary wide"
+            disabled={value === null || pending}
+            onClick={() => value !== null && onSubmit(value)}
+          >
+            Lock my choice
+          </button>
+        </div>
+      )}
+
+      <div className="submission-rail">
+        {room.players.map((player) => (
+          <span
+            className={player.has_modifier_submitted ? "answered" : ""}
+            key={player.name}
+          >
+            {player.name}
+          </span>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function Reveal({
   room,
   isHost,
+  pending,
   onAdvance,
 }: {
   room: RoomView;
   isHost: boolean;
+  pending: boolean;
   onAdvance: () => void;
 }) {
   const sortedAnswers = useMemo(
@@ -481,6 +680,7 @@ function Reveal({
     <section className="stage reveal-stage">
       <p className="eyebrow">THE ROOM HAS SPOKEN</p>
       <h1>{room.question?.prompt}</h1>
+      <RevealModifierCard room={room} />
       <div className="reveal-axis">
         <div className="axis-line" />
         <span className="axis-left">DISAGREE</span>
@@ -522,7 +722,11 @@ function Reveal({
         </p>
       </div>
       {isHost ? (
-        <button className="button primary wide" onClick={onAdvance}>
+        <button
+          className="button primary wide"
+          disabled={pending}
+          onClick={onAdvance}
+        >
           {room.round_number === room.round_count
             ? "See the final table"
             : "Next round"}
@@ -533,6 +737,45 @@ function Reveal({
         </p>
       )}
     </section>
+  );
+}
+
+function RevealModifierCard({ room }: { room: RoomView }) {
+  const modifier = room.modifier;
+  if (!modifier) return null;
+
+  if (modifier.type === "devils_advocate") {
+    return (
+      <article className="reveal-modifier devil-card">
+        <span className="modifier-badge">DEVIL'S ADVOCATE</span>
+        <h2>{modifier.target_player_name}, the wheel chose you.</h2>
+        <p>{modifier.instructions}</p>
+      </article>
+    );
+  }
+
+  return (
+    <article className="reveal-modifier">
+      <span className="modifier-badge">{modifier.title}</span>
+      <h2>
+        {modifier.type === "predict_room"
+          ? "Who read the room?"
+          : "What mattered underneath?"}
+      </h2>
+      <div className="modifier-result-grid">
+        {(modifier.results ?? []).map((result) => (
+          <div key={result.player_name}>
+            <strong>{result.player_name}</strong>
+            <span>
+              {typeof result.value === "number"
+                ? formatPosition(result.value)
+                : result.value.replaceAll("_", " ")}
+            </span>
+            {result.score !== null && <small>{result.score} pts</small>}
+          </div>
+        ))}
+      </div>
+    </article>
   );
 }
 

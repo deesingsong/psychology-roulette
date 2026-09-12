@@ -18,6 +18,8 @@ frontend/vite.config.d.ts
 !.env.example
 *.db
 *.sqlite3
+.*-run.log
+.*-run.err
 
 .idea/
 .vscode/
