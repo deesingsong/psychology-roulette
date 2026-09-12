@@ -1,0 +1,1 @@
+"""Psychology Roulette game server."""

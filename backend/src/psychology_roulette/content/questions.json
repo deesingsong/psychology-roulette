@@ -1,0 +1,66 @@
+[
+  {
+    "id": "ethics_001",
+    "prompt": "A person should have the right to make decisions that seriously harm themselves, provided nobody else is directly harmed.",
+    "category": "ethics",
+    "intensity": 2,
+    "values": ["autonomy", "harm", "responsibility"],
+    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "change_my_mind", "steelman"]
+  },
+  {
+    "id": "human_nature_001",
+    "prompt": "Most people are fundamentally good when they feel safe and understood.",
+    "category": "human_nature",
+    "intensity": 1,
+    "values": ["trust", "security", "character"],
+    "modifiers_allowed": ["predict_room", "devils_advocate", "steelman"]
+  },
+  {
+    "id": "relationships_001",
+    "prompt": "Protecting a friend's feelings can be more important than telling them the complete truth.",
+    "category": "relationships",
+    "intensity": 2,
+    "values": ["honesty", "loyalty", "care"],
+    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "change_my_mind"]
+  },
+  {
+    "id": "society_001",
+    "prompt": "A fair society should sometimes limit individual freedom to reduce collective harm.",
+    "category": "society",
+    "intensity": 2,
+    "values": ["freedom", "fairness", "harm"],
+    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "steelman"]
+  },
+  {
+    "id": "psychology_001",
+    "prompt": "People understand themselves less accurately than their close friends understand them.",
+    "category": "psychology",
+    "intensity": 1,
+    "values": ["self_knowledge", "perception", "intimacy"],
+    "modifiers_allowed": ["predict_room", "devils_advocate", "change_my_mind"]
+  },
+  {
+    "id": "philosophy_001",
+    "prompt": "A comfortable illusion can sometimes be better for a person than a painful truth.",
+    "category": "philosophy",
+    "intensity": 2,
+    "values": ["truth", "wellbeing", "autonomy"],
+    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "steelman", "change_my_mind"]
+  },
+  {
+    "id": "society_002",
+    "prompt": "People have a moral responsibility to challenge harmful opinions expressed by their friends.",
+    "category": "society",
+    "intensity": 2,
+    "values": ["loyalty", "responsibility", "courage"],
+    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "steelman"]
+  },
+  {
+    "id": "absurd_001",
+    "prompt": "If every memory of an embarrassing mistake disappeared, you would lose something important about who you are.",
+    "category": "absurd_hypotheticals",
+    "intensity": 1,
+    "values": ["identity", "growth", "comfort"],
+    "modifiers_allowed": ["predict_room", "secret_principle", "change_my_mind"]
+  }
+]
