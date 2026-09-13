@@ -101,6 +101,7 @@ def _modifier_snapshot(modifier: Modifier | None) -> dict[str, Any] | None:
         "timing": modifier.timing.value,
         "title": modifier.title,
         "instructions": modifier.instructions,
+        "context": modifier.context,
         "target_player_id": modifier.target_player_id,
         "source_player_id": modifier.source_player_id,
         "options": list(modifier.options),
@@ -183,11 +184,15 @@ def _modifier_from_snapshot(value: Any, field: str) -> Modifier | None:
             movement=movement,
         )
 
+    context_value = payload.get("context")
+    context = None if context_value is None else _string(context_value, f"{field}.context")
+
     return Modifier(
         type=modifier_type,
         timing=timing,
         title=_string(payload.get("title"), f"{field}.title"),
         instructions=_string(payload.get("instructions"), f"{field}.instructions"),
+        context=context,
         target_player_id=target_player_id,
         source_player_id=source_player_id,
         options=options,

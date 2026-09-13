@@ -48,7 +48,7 @@ The opening round is always plain so players can learn the basic loop. Each late
 
 The engine selects only from modifier templates allowed by the current question. Target selection and scoring remain deterministic server responsibilities. Tests can inject a fixed seed for exact reproducibility, but production seeds are never serialized. Targeted challenges are drawn from the least-targeted players and avoid an immediate repeat whenever another equally fair player is available. After a Steelman round is answered, the server assigns the selected writer the other player whose recorded position is furthest from theirs.
 
-AI may eventually generate contextual wording inside a selected template. It may not invent authoritative scoring rules, select ineligible players, or block the round. Invalid or late AI output falls back to curated copy.
+At game start, AI may generate one short contextual discussion angle inside each already-selected modifier. It cannot change the canonical instructions, invent authoritative scoring rules, select players, or block the round. Invalid, late, or unavailable AI output falls back to curated copy. Requests contain only curated question and modifier content, not room identifiers, player names, answers, credentials, or scores.
 
 Initial modifier families:
 
@@ -58,7 +58,7 @@ Initial modifier families:
 4. **Steelman** — after discussion, one fairly selected player writes a concise good-faith restatement of the most distant submitted position. Only that player may submit, and the text stays private until the host reveals it.
 5. **Change My Mind** — after discussion, every player privately chooses from the same seven-position scale again. The follow-up reveal shows the original and new position plus absolute movement.
 
-All five are implemented with curated instructions. AI-authored contextual wording is a later enhancement and will use the same validated modifier structure.
+All five use curated canonical instructions. Optional AI-authored context is separately labeled in the interface and stored in the same validated modifier structure.
 
 ## Scoring
 
@@ -94,4 +94,6 @@ Participant credentials prevent room snapshots and actions from being read or ch
 
 Only the host participant credential can end a game. Ending early deletes the room and all of its participant sessions atomically. Other clients discover that the room has ended on their next poll, discard their local credentials, and return to the home screen.
 
-The container edge applies an additional create/join throttle, overwrites untrusted forwarded-address headers, serves the client and API from one origin, and adds browser security headers. The API container is internal-only. TLS termination, backups, monitoring, and machine-specific Oracle configuration remain deployment responsibilities.
+The container edge applies an additional create/join throttle, overwrites untrusted forwarded-address headers, serves the client and API from one origin, and adds browser security headers. The API container is internal-only.
+
+The AI gateway runs on Oracle behind an outbound-only Cloudflare Tunnel and requires a shared Bearer credential. The Qwen runtime is reachable only from its private container network, while the gateway is additionally bound to loopback for server-side diagnostics. TLS terminates at Cloudflare. Backups and monitoring remain deployment responsibilities.

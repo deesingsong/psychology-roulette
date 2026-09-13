@@ -13,6 +13,7 @@ Players privately take positions on thoughtful questions, predict one another, r
 - Start a six-round game from a curated question pack.
 - Submit a private position and confidence rating.
 - Encounter occasional, deterministically selected round modifiers.
+- Add an optional AI-written discussion angle without giving AI control of rules.
 - Predict the room, name a secret principle, defend another side, steelman a
   counterpart, or privately answer again after discussion.
 - Reveal the room distribution after everyone answers.
@@ -24,7 +25,7 @@ Players privately take positions on thoughtful questions, predict one another, r
 - Return everyone home after completion without retaining stale seats.
 - Deterministic, testable game rules independent of the UI.
 
-Room state is stored as versioned snapshots: SQLite for local development and Postgres for hosted deployments. Each participant receives an unguessable reconnect credential; only its hash is stored by the server, and game actions derive the acting player from that credential. AI-authored contextual wording and Oracle deployment are intentionally deferred until the deterministic product is settled.
+Room state is stored as versioned snapshots: SQLite for local development and Postgres for hosted deployments. Each participant receives an unguessable reconnect credential; only its hash is stored by the server, and game actions derive the acting player from that credential. At game start, FastAPI can ask the authenticated Oracle gateway for short contextual discussion angles. The deterministic engine still owns the modifier schedule, targets, instructions, and scoring.
 
 Room snapshots and actions require participant credentials. New players join with the four-letter room code and a display name. Room create and join endpoints have database-backed rate limits, and the production container adds edge throttling.
 
@@ -36,18 +37,21 @@ React + TypeScript client
           | JSON/HTTP with short polling
           v
 FastAPI application
-          |
-          | atomic room mutations
-          v
-Repository interface
-      /             \
-SQLite (local)   Postgres (hosted)
-          |
-          v
+      |                              |
+      | atomic room mutations        | optional authenticated HTTPS
+      v                              v
+Repository interface         Cloudflare Tunnel
+   /             \                  |
+SQLite (local) Postgres (hosted)     v
+      |                       Oracle gateway -> Qwen 0.6B
+      v
 Pure Python game engine
 ```
 
-The AI service is optional by design. If Qwen is unavailable, the game remains fully playable.
+The AI service is optional by design. Requests contain curated question and modifier
+text only, never room identifiers, participants, answers, credentials, or scores. If
+Qwen is unavailable, slow, or returns invalid data, the game immediately keeps the
+curated copy and remains fully playable.
 
 ## Development
 
@@ -121,6 +125,9 @@ Supabase Postgres data. `vercel.json` contains the service routing, and
    ```text
    PSYCHOLOGY_ROULETTE_DATABASE_URL=<Supabase transaction-pooler URL>
    PSYCHOLOGY_ROULETTE_ROOM_TTL_SECONDS=604800
+   PSYCHOLOGY_ROULETTE_AI_BASE_URL=<Cloudflare Tunnel HTTPS hostname, optional>
+   PSYCHOLOGY_ROULETTE_AI_TOKEN=<Oracle gateway secret, required with AI URL>
+   PSYCHOLOGY_ROULETTE_AI_TIMEOUT_SECONDS=12
    ```
 
 5. Deploy. Later pushes to the connected branch redeploy automatically; no local
@@ -137,10 +144,10 @@ Vercel's dynamic outbound addresses do not affect this database connection becau
 the Supabase transaction pooler is a credential-authenticated public endpoint, not
 an Oracle IP allowlist.
 
-No Oracle-specific code is required for this deployment boundary. The future Qwen
-integration will be an optional HTTPS call made by FastAPI. A Cloudflare Tunnel can
-later publish only that authenticated Oracle endpoint; the core game remains usable
-when the AI endpoint is unavailable.
+The Oracle deployment lives in `oracle/`. It runs the official ARM64 llama.cpp server
+with Qwen3 0.6B Q8_0 behind a narrow authenticated gateway. The model has explicit
+CPU and memory limits and is not published on an Oracle ingress port. The optional
+Cloudflare connector reaches the gateway over the private Compose network.
 
 ## Production container
 

@@ -610,6 +610,24 @@ footer {
   margin: 8px 0 0;
   font: 600 1rem/1.5 "Manrope";
 }
+.modifier-context {
+  margin: 18px 0 4px;
+  padding: 15px 17px;
+  border: 1px solid rgba(156, 124, 255, 0.28);
+  border-radius: 13px;
+  background: rgba(156, 124, 255, 0.08);
+}
+.modifier-context span {
+  color: #c4b2ff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.modifier-context p {
+  margin: 7px 0 0;
+  color: var(--ink);
+  font: 600 0.95rem/1.55 "Manrope";
+}
 .principle-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

@@ -26,6 +26,7 @@ export interface ModifierView {
   timing: "pre_reveal" | "post_reveal";
   title: string;
   instructions: string;
+  context: string | null;
   target_player_name: string | null;
   source_player_name: string | null;
   options: (number | string)[];

@@ -27,3 +27,5 @@ frontend/vite.config.d.ts
 .vscode/
 .DS_Store
 Thumbs.db
+
+.vercel/

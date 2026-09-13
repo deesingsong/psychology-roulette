@@ -1,0 +1,53 @@
+services:
+  model:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    command:
+      - -hf
+      - Qwen/Qwen3-0.6B-GGUF:Q8_0
+      - --alias
+      - qwen3-0.6b
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --ctx-size
+      - "2048"
+      - --threads
+      - "2"
+      - --parallel
+      - "1"
+      - --no-webui
+    volumes:
+      - model-cache:/root/.cache
+    restart: unless-stopped
+    mem_limit: 1536m
+    cpus: 2.0
+
+  gateway:
+    build: ./gateway
+    environment:
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Set GATEWAY_TOKEN in oracle/.env}
+      LLAMA_BASE_URL: http://model:8080
+      LLAMA_MODEL: qwen3-0.6b
+      LLAMA_TIMEOUT_SECONDS: "45"
+    depends_on:
+      - model
+    ports:
+      - 127.0.0.1:8787:8000
+    restart: unless-stopped
+    mem_limit: 192m
+    cpus: 0.5
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in oracle/.env}
+    depends_on:
+      - gateway
+    restart: unless-stopped
+    mem_limit: 96m
+    cpus: 0.25
+    profiles:
+      - tunnel
+
+volumes:
+  model-cache:

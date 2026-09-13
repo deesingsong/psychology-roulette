@@ -1048,6 +1048,7 @@ function ModifierStage({
         <p className="eyebrow">ROUND {room.round_number}</p>
         <h1>{modifier.title}</h1>
         <p className="lede">{modifier.instructions}</p>
+        <ModifierContext context={modifier.context} />
       </div>
       <div className="modifier-question">
         <span>THE QUESTION</span>
@@ -1193,6 +1194,7 @@ function FollowUpStage({
         <p className="eyebrow">ROUND {room.round_number}</p>
         <h1>{modifier.title}</h1>
         <p className="lede">{modifier.instructions}</p>
+        <ModifierContext context={modifier.context} />
       </div>
 
       {modifier.type === "steelman" && (
@@ -1392,6 +1394,16 @@ function Reveal({
   );
 }
 
+function ModifierContext({ context }: { context: string | null }) {
+  if (!context) return null;
+  return (
+    <aside className="modifier-context">
+      <span>AI DISCUSSION ANGLE</span>
+      <p>{context}</p>
+    </aside>
+  );
+}
+
 function RevealModifierCard({ room }: { room: RoomView }) {
   const modifier = room.modifier;
   if (!modifier) return null;
@@ -1402,6 +1414,7 @@ function RevealModifierCard({ room }: { room: RoomView }) {
         <span className="modifier-badge">DEVIL'S ADVOCATE</span>
         <h2>{modifier.target_player_name}, the wheel chose you.</h2>
         <p>{modifier.instructions}</p>
+        <ModifierContext context={modifier.context} />
       </article>
     );
   }
@@ -1431,6 +1444,7 @@ function RevealModifierCard({ room }: { room: RoomView }) {
             </p>
           </>
         )}
+        <ModifierContext context={modifier.context} />
       </article>
     );
   }
@@ -1445,6 +1459,7 @@ function RevealModifierCard({ room }: { room: RoomView }) {
             Everyone will privately choose again after the discussion. Movement
             is information, not a score.
           </p>
+          <ModifierContext context={modifier.context} />
         </article>
       );
     }
@@ -1485,6 +1500,7 @@ function RevealModifierCard({ room }: { room: RoomView }) {
           ? "Who read the room?"
           : "What mattered underneath?"}
       </h2>
+      <ModifierContext context={modifier.context} />
       <div className="modifier-result-grid">
         {(modifier.results ?? []).map((result) => (
           <div key={result.player_name}>

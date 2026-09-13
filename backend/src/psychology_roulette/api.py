@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from dataclasses import dataclass
 from typing import Annotated
@@ -11,6 +12,11 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, StrictInt, StrictStr
 
+from psychology_roulette.ai import (
+    ModifierContextProvider,
+    apply_modifier_contexts,
+    configured_modifier_context_provider,
+)
 from psychology_roulette.domain import (
     GameError,
     ModifierTiming,
@@ -26,6 +32,7 @@ from psychology_roulette.store import (
 )
 
 bearer_scheme = HTTPBearer(auto_error=False)
+logger = logging.getLogger(__name__)
 
 
 def require_access_token(
@@ -100,6 +107,7 @@ class ModifierView(BaseModel):
     timing: ModifierTiming
     title: str
     instructions: str
+    context: str | None
     target_player_name: str | None
     source_player_name: str | None
     options: list[int | str]
@@ -269,6 +277,7 @@ def room_view(room: Room) -> RoomView:
             timing=modifier.timing,
             title=modifier.title,
             instructions=modifier.instructions,
+            context=modifier.context,
             target_player_name=(
                 room.players[modifier.target_player_id].name
                 if modifier.target_player_id is not None
@@ -350,6 +359,7 @@ def create_app(
     store: RoomRepository | None = None,
     *,
     entry_rate_limits: EntryRateLimits | None = None,
+    modifier_context_provider: ModifierContextProvider | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Psychology Roulette API",
@@ -365,6 +375,11 @@ def create_app(
     )
     active_store = store if store is not None else default_store
     active_rate_limits = entry_rate_limits or EntryRateLimits.from_environment()
+    active_context_provider = (
+        modifier_context_provider
+        if modifier_context_provider is not None
+        else configured_modifier_context_provider()
+    )
 
     def enforce_entry_limit(request: Request, action: str) -> None:
         client_host = request.client.host if request.client else "unknown"
@@ -488,6 +503,19 @@ def create_app(
             access_token,
             lambda active_room, player_id: active_room.start(host_id=player_id),
         )
+        if active_context_provider is not None:
+            try:
+                contexts = active_context_provider.generate(room)
+                if contexts:
+                    room = active_store.mutate(
+                        code,
+                        access_token,
+                        lambda active_room, _player_id: apply_modifier_contexts(
+                            active_room, contexts
+                        ),
+                    )
+            except Exception:
+                logger.exception("Optional modifier context generation failed.")
         return room_view(room)
 
     @app.post("/api/rooms/{code}/answers", response_model=RoomView)

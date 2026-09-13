@@ -71,6 +71,7 @@ class Modifier:
     timing: ModifierTiming
     title: str
     instructions: str
+    context: str | None = None
     target_player_id: str | None = None
     source_player_id: str | None = None
     options: tuple[int | str, ...] = ()

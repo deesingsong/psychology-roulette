@@ -2,8 +2,9 @@ import secrets
 
 from fastapi.testclient import TestClient
 
+from psychology_roulette.ai import ModifierContext
 from psychology_roulette.api import EntryRateLimits, create_app
-from psychology_roulette.domain import Question
+from psychology_roulette.domain import ModifierType, Question
 from psychology_roulette.store import RoomStore
 
 
@@ -415,6 +416,71 @@ def _client_at_second_round(modifier_type: str) -> tuple[TestClient, str, str, s
     return client, code, host_token, guest_token
 
 
+def test_start_attaches_optional_ai_context_without_changing_modifier_rules() -> None:
+    store = RoomStore()
+    original_instructions = []
+
+    class ContextProvider:
+        def generate(self, room):
+            modifier = room.rounds[1].modifier
+            assert modifier is not None
+            assert modifier.target_player_id is not None
+            original_instructions.append(modifier.instructions)
+            return (
+                ModifierContext(
+                    round_number=2,
+                    question_id="api-q2",
+                    modifier_type=ModifierType.DEVILS_ADVOCATE,
+                    text="Ask which hidden tradeoff the opposing view protects.",
+                ),
+            )
+
+    client = TestClient(create_app(store, modifier_context_provider=ContextProvider()))
+    code, host, _guest = _create_two_player_room(client)
+    host_token = host["access_token"]
+
+    def configure(room, _player_id: str) -> None:
+        room.modifier_chance = 1
+        room.questions = [
+            Question(
+                id=f"api-q{number}",
+                prompt=f"API question {number}",
+                category="ethics",
+                intensity=1,
+                values=("fairness", "care"),
+                modifiers_allowed=("devils_advocate",) if number == 2 else (),
+            )
+            for number in range(1, 7)
+        ]
+
+    store.mutate(code, host_token, configure)
+    response = client.post(f"/api/rooms/{code}/start", headers=_auth(host_token))
+    assert response.status_code == 200
+    saved_modifier = store.get(code).rounds[1].modifier
+    assert saved_modifier is not None
+    assert saved_modifier.instructions == original_instructions[0]
+    assert saved_modifier.context == (
+        "Ask which hidden tradeoff the opposing view protects."
+    )
+
+
+def test_start_falls_back_to_curated_copy_when_ai_fails() -> None:
+    class FailingProvider:
+        def generate(self, _room):
+            raise TimeoutError("offline")
+
+    client = TestClient(
+        create_app(RoomStore(), modifier_context_provider=FailingProvider())
+    )
+    code, host, _guest = _create_two_player_room(client)
+    response = client.post(
+        f"/api/rooms/{code}/start",
+        headers=_auth(host["access_token"]),
+    )
+    assert response.status_code == 200
+    assert response.json()["phase"] == "answering"
+
+
 def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
     client, code, host_token, guest_token = _client_at_second_round("predict_room")
     client.post(
@@ -437,6 +503,7 @@ def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
         "instructions": (
             "Before the answers are revealed, predict where the room's average position will land."
         ),
+        "context": None,
         "target_player_name": None,
         "source_player_name": None,
         "options": [-100, -67, -33, 0, 33, 67, 100],
