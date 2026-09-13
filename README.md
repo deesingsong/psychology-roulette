@@ -7,7 +7,9 @@ Players privately take positions on thoughtful questions, predict one another, r
 ## Current vertical slice
 
 - Create a room and receive a four-letter code.
-- Join from multiple browser tabs or devices.
+- Join from multiple devices or isolated browser profiles.
+- Recover the same private seat after a refresh or browser restart.
+- Preserve active rooms across server restarts with SQLite snapshots.
 - Start a six-round game from a curated question pack.
 - Submit a private position and confidence rating.
 - Encounter occasional, deterministically selected round modifiers.
@@ -17,9 +19,9 @@ Players privately take positions on thoughtful questions, predict one another, r
 - Advance through the complete session.
 - Deterministic, testable game rules independent of the UI.
 
-The initial implementation intentionally keeps room state in memory. SQLite persistence, reconnect tokens, the remaining modifier families, session analytics, and optional Qwen commentary come next.
+Room state is stored as versioned SQLite snapshots. Each participant receives an unguessable reconnect credential; only its hash is stored by the server, and game actions derive the acting player from that credential. The remaining modifier families, session analytics, and optional Qwen commentary come next.
 
-This vertical slice is intended for development and trusted local-network play. Add participant read credentials and rate limiting before exposing it directly to the public internet.
+Room snapshots and actions require participant credentials. The create and four-letter join endpoints remain intentionally easy to access, so add rate limiting, room expiry, and either trusted-edge abuse controls or a higher-entropy invite secret before exposing the game directly to the public internet.
 
 ## Architecture
 
@@ -29,6 +31,10 @@ React + TypeScript client
           | JSON/HTTP with short polling
           v
 FastAPI application
+          |
+          | atomic room mutations
+          v
+SQLite snapshot store
           |
           v
 Pure Python game engine
@@ -52,6 +58,8 @@ To test from another device on the same Wi-Fi network:
 
 The launcher prints the remote-device URL. Windows may ask you to allow Node.js and Python through the private-network firewall.
 
+Reconnect storage represents one seat per browser profile. When testing several players on one computer, use different browsers or profiles, or use one normal and one private session, so each player keeps an independent credential.
+
 You can also run each service separately:
 
 ### Backend
@@ -63,6 +71,8 @@ uv run uvicorn psychology_roulette.api:app --reload --port 8000
 ```
 
 The API documentation is available at `http://localhost:8000/docs`.
+
+By default, development rooms are stored in `backend/data/psychology-roulette.sqlite3`. Set `PSYCHOLOGY_ROULETTE_DB_PATH` to use a different database file.
 
 ### Frontend
 

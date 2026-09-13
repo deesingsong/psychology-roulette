@@ -247,6 +247,17 @@ input:focus {
   background: rgba(255, 111, 97, 0.08);
   color: var(--coral-light);
 }
+.connection-notice {
+  margin: 0;
+  padding: 12px 15px;
+  border: 1px solid rgba(156, 124, 255, 0.4);
+  border-radius: 10px;
+  background: rgba(156, 124, 255, 0.1);
+  color: #c9bbff;
+}
+.landing-notice {
+  margin-bottom: 16px;
+}
 footer {
   margin-top: 24px;
   color: #77717d;
@@ -699,12 +710,17 @@ footer {
 .complete-stage .lede {
   margin-inline: auto;
 }
-.floating-error {
+.floating-messages {
   position: fixed;
   z-index: 10;
   right: 20px;
   top: 82px;
+  display: grid;
+  gap: 8px;
   max-width: 360px;
+}
+.floating-messages p {
+  margin: 0;
 }
 .leave {
   display: block;

@@ -1,73 +1,162 @@
-import type { RoomSessionView, RoomView } from "./types";
+import type {
+  RestoredRoomSessionView,
+  RoomSessionView,
+  RoomView,
+} from "./types";
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options?.headers,
-    },
-  });
+interface AuthenticatedRequestInit extends RequestInit {
+  accessToken?: string;
+  requestTimeoutMs?: number;
+}
 
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as {
-      detail?: string;
-    } | null;
-    throw new Error(payload?.detail ?? "Something went wrong.");
+const DEFAULT_REQUEST_TIMEOUT_MS = 10000;
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+async function request<T>(
+  path: string,
+  options: AuthenticatedRequestInit = {},
+): Promise<T> {
+  const {
+    accessToken,
+    requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    signal: callerSignal,
+    ...fetchOptions
+  } = options;
+  const headers = new Headers(fetchOptions.headers);
+  const controller = new AbortController();
+  let timedOut = false;
+
+  const abortForCaller = () => controller.abort();
+  if (callerSignal?.aborted) {
+    controller.abort();
+  } else {
+    callerSignal?.addEventListener("abort", abortForCaller, { once: true });
+  }
+  const timeout = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, requestTimeoutMs);
+
+  if (fetchOptions.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (accessToken) {
+    headers.set("Authorization", "Bearer " + accessToken);
   }
 
-  return response.json() as Promise<T>;
+  try {
+    const response = await fetch(path, {
+      ...fetchOptions,
+      headers,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => null)) as {
+        detail?: unknown;
+        code?: unknown;
+      } | null;
+      throw new ApiError(
+        typeof payload?.detail === "string"
+          ? payload.detail
+          : "Something went wrong.",
+        response.status,
+        typeof payload?.code === "string" ? payload.code : undefined,
+      );
+    }
+
+    return (await response.json()) as T;
+  } catch (reason) {
+    if (timedOut) {
+      throw new ApiError(
+        "The server took too long to respond.",
+        408,
+        "request_timeout",
+      );
+    }
+    throw reason;
+  } finally {
+    window.clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", abortForCaller);
+  }
+}
+
+function roomPath(code: string, suffix = "") {
+  return "/api/rooms/" + encodeURIComponent(code) + suffix;
 }
 
 export const api = {
-  createRoom(hostName: string) {
+  createRoom(hostName: string, accessToken: string) {
     return request<RoomSessionView>("/api/rooms", {
       method: "POST",
+      accessToken,
       body: JSON.stringify({ host_name: hostName }),
     });
   },
-  joinRoom(code: string, name: string) {
-    return request<RoomSessionView>(`/api/rooms/${code}/players`, {
+  joinRoom(code: string, name: string, accessToken: string) {
+    return request<RoomSessionView>(roomPath(code, "/players"), {
       method: "POST",
+      accessToken,
       body: JSON.stringify({ name }),
     });
   },
-  getRoom(code: string) {
-    return request<RoomView>(`/api/rooms/${code}`);
+  resume(accessToken: string, signal?: AbortSignal) {
+    return request<RestoredRoomSessionView>("/api/session", {
+      accessToken,
+      signal,
+    });
   },
-  startRoom(code: string, playerId: string) {
-    return request<RoomView>(`/api/rooms/${code}/start`, {
+  getRoom(code: string, accessToken: string, signal?: AbortSignal) {
+    return request<RoomView>(roomPath(code), {
+      accessToken,
+      signal,
+    });
+  },
+  startRoom(code: string, accessToken: string) {
+    return request<RoomView>(roomPath(code, "/start"), {
       method: "POST",
-      body: JSON.stringify({ player_id: playerId }),
+      accessToken,
     });
   },
   submitAnswer(
     code: string,
-    playerId: string,
+    accessToken: string,
     position: number,
     confidence: number,
   ) {
-    return request<RoomView>(`/api/rooms/${code}/answers`, {
+    return request<RoomView>(roomPath(code, "/answers"), {
       method: "POST",
-      body: JSON.stringify({ player_id: playerId, position, confidence }),
+      accessToken,
+      body: JSON.stringify({ position, confidence }),
     });
   },
-  submitModifier(code: string, playerId: string, value: number | string) {
-    return request<RoomView>(`/api/rooms/${code}/modifier-submissions`, {
+  submitModifier(code: string, accessToken: string, value: number | string) {
+    return request<RoomView>(roomPath(code, "/modifier-submissions"), {
       method: "POST",
-      body: JSON.stringify({ player_id: playerId, value }),
+      accessToken,
+      body: JSON.stringify({ value }),
     });
   },
-  reveal(code: string, playerId: string) {
-    return request<RoomView>(`/api/rooms/${code}/reveal`, {
+  reveal(code: string, accessToken: string) {
+    return request<RoomView>(roomPath(code, "/reveal"), {
       method: "POST",
-      body: JSON.stringify({ player_id: playerId }),
+      accessToken,
     });
   },
-  advance(code: string, playerId: string) {
-    return request<RoomView>(`/api/rooms/${code}/advance`, {
+  advance(code: string, accessToken: string) {
+    return request<RoomView>(roomPath(code, "/advance"), {
       method: "POST",
-      body: JSON.stringify({ player_id: playerId }),
+      accessToken,
     });
   },
 };

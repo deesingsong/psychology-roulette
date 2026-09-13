@@ -56,7 +56,17 @@ export interface RoomView {
 }
 
 export interface RoomSessionView {
+  access_token: string;
   player_id: string;
+  player_name: string;
+  is_host: boolean;
+  room: RoomView;
+}
+
+export interface RestoredRoomSessionView {
+  player_id: string;
+  player_name: string;
+  is_host: boolean;
   room: RoomView;
 }
 
@@ -65,4 +75,5 @@ export interface Session {
   playerId: string;
   playerName: string;
   isHost: boolean;
+  accessToken: string;
 }

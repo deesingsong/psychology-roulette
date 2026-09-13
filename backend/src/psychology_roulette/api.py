@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, Request
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, StrictInt, StrictStr
 
 from psychology_roulette.domain import (
@@ -11,7 +15,36 @@ from psychology_roulette.domain import (
     Room,
     RoomPhase,
 )
-from psychology_roulette.store import RoomStore, default_store
+from psychology_roulette.store import (
+    RoomAccessDenied,
+    RoomStore,
+    UnknownAccessToken,
+    default_store,
+)
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def require_access_token(
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None,
+        Depends(bearer_scheme),
+    ],
+) -> str:
+    if (
+        credentials is None
+        or credentials.scheme.casefold() != "bearer"
+        or not credentials.credentials
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="A valid room access token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return credentials.credentials
+
+
+AccessToken = Annotated[str, Depends(require_access_token)]
 
 
 class CreateRoomRequest(BaseModel):
@@ -22,16 +55,12 @@ class JoinRoomRequest(BaseModel):
     name: str = Field(min_length=1, max_length=24)
 
 
-class PlayerActionRequest(BaseModel):
-    player_id: str
-
-
-class SubmitAnswerRequest(PlayerActionRequest):
+class SubmitAnswerRequest(BaseModel):
     position: int
     confidence: int = Field(ge=0, le=100)
 
 
-class SubmitModifierRequest(PlayerActionRequest):
+class SubmitModifierRequest(BaseModel):
     value: StrictInt | StrictStr
 
 
@@ -86,9 +115,15 @@ class RoomView(BaseModel):
     modifier: ModifierView | None
 
 
-class RoomSessionView(BaseModel):
+class ResumedRoomSessionView(BaseModel):
     player_id: str
+    player_name: str
+    is_host: bool
     room: RoomView
+
+
+class RoomSessionView(ResumedRoomSessionView):
+    access_token: str
 
 
 def room_view(room: Room) -> RoomView:
@@ -195,13 +230,41 @@ def create_app(store: RoomStore | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    active_store = store or default_store
+    active_store = store if store is not None else default_store
+
+    @app.middleware("http")
+    async def prevent_session_caching(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/api/session" or request.url.path.startswith("/api/rooms"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.exception_handler(GameError)
-    async def game_error_handler(_request: Request, exc: GameError):
-        return __import__("fastapi").responses.JSONResponse(
+    async def game_error_handler(_request: Request, exc: GameError) -> JSONResponse:
+        return JSONResponse(
             status_code=409,
             content={"detail": str(exc)},
+        )
+
+    @app.exception_handler(UnknownAccessToken)
+    async def unknown_access_token_handler(
+        _request: Request,
+        _exc: UnknownAccessToken,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "A valid room access token is required."},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    @app.exception_handler(RoomAccessDenied)
+    async def room_access_denied_handler(
+        _request: Request,
+        _exc: RoomAccessDenied,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=403,
+            content={"detail": "This access token does not belong to that room."},
         )
 
     @app.get("/api/health")
@@ -209,54 +272,114 @@ def create_app(store: RoomStore | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/api/rooms", response_model=RoomSessionView, status_code=201)
-    def create_room(request: CreateRoomRequest) -> RoomSessionView:
-        room = active_store.create()
-        host = room.add_player(request.host_name, is_host=True)
-        return RoomSessionView(player_id=host.id, room=room_view(room))
+    def create_room(
+        request: CreateRoomRequest,
+        access_token: AccessToken,
+    ) -> RoomSessionView:
+        room, host, access_token = active_store.create_room(
+            request.host_name,
+            access_token,
+        )
+        return RoomSessionView(
+            access_token=access_token,
+            player_id=host.id,
+            player_name=host.name,
+            is_host=host.is_host,
+            room=room_view(room),
+        )
+
+    @app.get("/api/session", response_model=ResumedRoomSessionView)
+    def resume_session(access_token: AccessToken) -> ResumedRoomSessionView:
+        room, player = active_store.resume(access_token)
+        return ResumedRoomSessionView(
+            player_id=player.id,
+            player_name=player.name,
+            is_host=player.is_host,
+            room=room_view(room),
+        )
 
     @app.get("/api/rooms/{code}", response_model=RoomView)
-    def inspect_room(code: str) -> RoomView:
-        room = active_store.get(code)
+    def inspect_room(code: str, access_token: AccessToken) -> RoomView:
+        room, _player = active_store.read(code, access_token)
         return room_view(room)
 
     @app.post("/api/rooms/{code}/players", response_model=RoomSessionView, status_code=201)
-    def join_room(code: str, request: JoinRoomRequest) -> RoomSessionView:
-        room = active_store.get(code)
-        player = room.add_player(request.name)
-        return RoomSessionView(player_id=player.id, room=room_view(room))
+    def join_room(
+        code: str,
+        request: JoinRoomRequest,
+        access_token: AccessToken,
+    ) -> RoomSessionView:
+        room, player, access_token = active_store.join_room(
+            code,
+            request.name,
+            access_token,
+        )
+        return RoomSessionView(
+            access_token=access_token,
+            player_id=player.id,
+            player_name=player.name,
+            is_host=player.is_host,
+            room=room_view(room),
+        )
 
     @app.post("/api/rooms/{code}/start", response_model=RoomView)
-    def start_room(code: str, request: PlayerActionRequest) -> RoomView:
-        room = active_store.get(code)
-        room.start(host_id=request.player_id)
+    def start_room(code: str, access_token: AccessToken) -> RoomView:
+        room = active_store.mutate(
+            code,
+            access_token,
+            lambda active_room, player_id: active_room.start(host_id=player_id),
+        )
         return room_view(room)
 
     @app.post("/api/rooms/{code}/answers", response_model=RoomView)
-    def submit_answer(code: str, request: SubmitAnswerRequest) -> RoomView:
-        room = active_store.get(code)
-        room.submit_answer(
-            player_id=request.player_id,
-            position=request.position,
-            confidence=request.confidence,
+    def submit_answer(
+        code: str,
+        request: SubmitAnswerRequest,
+        access_token: AccessToken,
+    ) -> RoomView:
+        room = active_store.mutate(
+            code,
+            access_token,
+            lambda active_room, player_id: active_room.submit_answer(
+                player_id=player_id,
+                position=request.position,
+                confidence=request.confidence,
+            ),
         )
         return room_view(room)
 
     @app.post("/api/rooms/{code}/modifier-submissions", response_model=RoomView)
-    def submit_modifier(code: str, request: SubmitModifierRequest) -> RoomView:
-        room = active_store.get(code)
-        room.submit_modifier(player_id=request.player_id, value=request.value)
+    def submit_modifier(
+        code: str,
+        request: SubmitModifierRequest,
+        access_token: AccessToken,
+    ) -> RoomView:
+        room = active_store.mutate(
+            code,
+            access_token,
+            lambda active_room, player_id: active_room.submit_modifier(
+                player_id=player_id,
+                value=request.value,
+            ),
+        )
         return room_view(room)
 
     @app.post("/api/rooms/{code}/reveal", response_model=RoomView)
-    def reveal_round(code: str, request: PlayerActionRequest) -> RoomView:
-        room = active_store.get(code)
-        room.reveal(host_id=request.player_id)
+    def reveal_round(code: str, access_token: AccessToken) -> RoomView:
+        room = active_store.mutate(
+            code,
+            access_token,
+            lambda active_room, player_id: active_room.reveal(host_id=player_id),
+        )
         return room_view(room)
 
     @app.post("/api/rooms/{code}/advance", response_model=RoomView)
-    def advance_round(code: str, request: PlayerActionRequest) -> RoomView:
-        room = active_store.get(code)
-        room.advance(host_id=request.player_id)
+    def advance_round(code: str, access_token: AccessToken) -> RoomView:
+        room = active_store.mutate(
+            code,
+            access_token,
+            lambda active_room, player_id: active_room.advance(host_id=player_id),
+        )
         return room_view(room)
 
     @app.get("/")

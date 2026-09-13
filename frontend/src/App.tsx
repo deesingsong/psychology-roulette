@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { api } from "./api";
+import { ApiError, api } from "./api";
 import type { RoomView, Session } from "./types";
 
 const POSITIONS = [
@@ -19,71 +19,389 @@ const POSITIONS = [
   { value: 100, short: "Strongly agree", mark: "+++" },
 ] as const;
 
-const SESSION_KEY = "psychology-roulette-session";
+const SESSION_STORAGE_VERSION = 1;
+const SESSION_KEY = "psychology-roulette-session-v1";
+const LEGACY_SESSION_KEY = "psychology-roulette-session";
 
-function readSession(): Session | null {
-  const raw = sessionStorage.getItem(SESSION_KEY);
-  if (!raw) return null;
+interface StoredSession {
+  version: typeof SESSION_STORAGE_VERSION;
+  roomCode: string;
+  accessToken: string;
+}
+
+interface PendingEntryAttempt {
+  fingerprint: string;
+  accessToken: string;
+}
+
+interface ActiveAction {
+  accessToken: string;
+  generation: number;
+}
+
+function createAccessToken() {
+  const bytes = new Uint8Array(32);
+  window.crypto.getRandomValues(bytes);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return window
+    .btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
+function readStoredSession(): StoredSession | null {
   try {
-    return JSON.parse(raw) as Session;
+    sessionStorage.removeItem(LEGACY_SESSION_KEY);
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      "version" in parsed &&
+      parsed.version === SESSION_STORAGE_VERSION &&
+      "roomCode" in parsed &&
+      typeof parsed.roomCode === "string" &&
+      /^[A-Z]{4}$/.test(parsed.roomCode) &&
+      "accessToken" in parsed &&
+      typeof parsed.accessToken === "string" &&
+      parsed.accessToken.length > 0
+    ) {
+      return {
+        version: SESSION_STORAGE_VERSION,
+        roomCode: parsed.roomCode,
+        accessToken: parsed.accessToken,
+      };
+    }
+
+    localStorage.removeItem(SESSION_KEY);
+    return null;
   } catch {
+    removeStoredSession();
     return null;
   }
 }
 
+function writeStoredSession(session: StoredSession) {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function removeStoredSession() {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    // The in-memory session can still be forgotten if browser storage is blocked.
+  }
+}
+
+function isAbortError(reason: unknown) {
+  return reason instanceof DOMException && reason.name === "AbortError";
+}
+
+function errorMessage(reason: unknown, fallback: string) {
+  return reason instanceof Error ? reason.message : fallback;
+}
+
 function App() {
-  const [session, setSession] = useState<Session | null>(readSession);
+  const [storedSession, setStoredSession] = useState<StoredSession | null>(
+    readStoredSession,
+  );
+  const [session, setSession] = useState<Session | null>(null);
   const [room, setRoom] = useState<RoomView | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [landingNotice, setLandingNotice] = useState<string | null>(null);
+  const activeTokenRef = useRef(storedSession?.accessToken ?? null);
+  const activeActionRef = useRef<ActiveAction | null>(null);
+  const actionPendingRef = useRef(false);
+  const pollControllerRef = useRef<AbortController | null>(null);
+  const requestGenerationRef = useRef(0);
 
-  const saveSession = (next: Session | null) => {
-    setSession(next);
-    if (next) sessionStorage.setItem(SESSION_KEY, JSON.stringify(next));
-    else sessionStorage.removeItem(SESSION_KEY);
-  };
+  const clearSession = useCallback((notice: string | null = null) => {
+    requestGenerationRef.current += 1;
+    activeTokenRef.current = null;
+    activeActionRef.current = null;
+    actionPendingRef.current = false;
+    pollControllerRef.current?.abort();
+    removeStoredSession();
+    setStoredSession(null);
+    setSession(null);
+    setRoom(null);
+    setActionError(null);
+    setConnectionError(null);
+    setLandingNotice(notice);
+  }, []);
 
-  const refresh = useCallback(async () => {
-    if (!session) return;
-    try {
-      setRoom(await api.getRoom(session.roomCode));
-      setError(null);
-    } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : "Could not reach the room.",
+  const activateSession = useCallback(
+    (nextSession: Session, nextRoom: RoomView) => {
+      requestGenerationRef.current += 1;
+      activeTokenRef.current = nextSession.accessToken;
+      activeActionRef.current = null;
+      actionPendingRef.current = false;
+      pollControllerRef.current?.abort();
+      const stored = {
+        version: SESSION_STORAGE_VERSION,
+        roomCode: nextSession.roomCode,
+        accessToken: nextSession.accessToken,
+      } satisfies StoredSession;
+      const wasSaved = writeStoredSession(stored);
+      setStoredSession(stored);
+      setSession(nextSession);
+      setRoom(nextRoom);
+      setLandingNotice(null);
+      setConnectionError(null);
+      setActionError(
+        wasSaved
+          ? null
+          : "This browser could not save your reconnect key. Keep this tab open.",
       );
-    }
-  }, [session]);
+    },
+    [],
+  );
 
   useEffect(() => {
-    if (!session) return;
-    const initialRefresh = window.setTimeout(() => void refresh(), 0);
-    const interval = window.setInterval(() => void refresh(), 1000);
-    return () => {
-      window.clearTimeout(initialRefresh);
-      window.clearInterval(interval);
-    };
-  }, [refresh, session]);
+    if (!storedSession) return;
 
-  if (!session) {
+    let cancelled = false;
+    let inFlight = false;
+    let wakeAfterFlight = false;
+    let failures = 0;
+    let timer: number | undefined;
+
+    const schedule = (delay: number) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => void poll(), delay);
+    };
+
+    const poll = async () => {
+      if (cancelled) return;
+      if (inFlight) {
+        wakeAfterFlight = true;
+        return;
+      }
+      if (actionPendingRef.current) {
+        schedule(250);
+        return;
+      }
+
+      inFlight = true;
+      const controller = new AbortController();
+      pollControllerRef.current = controller;
+      const generation = ++requestGenerationRef.current;
+
+      try {
+        const restored = await api.resume(
+          storedSession.accessToken,
+          controller.signal,
+        );
+        if (
+          cancelled ||
+          controller.signal.aborted ||
+          generation !== requestGenerationRef.current
+        ) {
+          return;
+        }
+
+        const nextSession: Session = {
+          roomCode: restored.room.code,
+          playerId: restored.player_id,
+          playerName: restored.player_name,
+          isHost: restored.is_host,
+          accessToken: storedSession.accessToken,
+        };
+        setSession(nextSession);
+        setRoom(restored.room);
+        setConnectionError(null);
+        failures = 0;
+
+        if (storedSession.roomCode !== restored.room.code) {
+          const corrected = {
+            ...storedSession,
+            roomCode: restored.room.code,
+          };
+          writeStoredSession(corrected);
+          setStoredSession(corrected);
+        }
+      } catch (reason) {
+        if (cancelled || isAbortError(reason)) return;
+        if (
+          reason instanceof ApiError &&
+          (reason.status === 401 || reason.status === 410)
+        ) {
+          cancelled = true;
+          clearSession(
+            "That saved seat is no longer available. Join the room again.",
+          );
+          return;
+        }
+
+        failures += 1;
+        setConnectionError(
+          navigator.onLine
+            ? "Connection lost. Retrying automatically…"
+            : "You appear to be offline. Your seat is saved on this device.",
+        );
+      } finally {
+        inFlight = false;
+        if (pollControllerRef.current === controller) {
+          pollControllerRef.current = null;
+        }
+        if (!cancelled) {
+          const retryDelay =
+            failures === 0
+              ? 1000
+              : Math.min(1000 * 2 ** Math.min(failures, 4), 10000);
+          const delay =
+            document.visibilityState === "hidden"
+              ? Math.max(retryDelay, 5000)
+              : retryDelay;
+          schedule(wakeAfterFlight ? 0 : delay);
+          wakeAfterFlight = false;
+        }
+      }
+    };
+
+    const wake = () => {
+      if (cancelled || document.visibilityState === "hidden") return;
+      if (inFlight) {
+        wakeAfterFlight = true;
+        return;
+      }
+      schedule(0);
+    };
+
+    schedule(0);
+    window.addEventListener("online", wake);
+    document.addEventListener("visibilitychange", wake);
+    return () => {
+      cancelled = true;
+      requestGenerationRef.current += 1;
+      window.clearTimeout(timer);
+      window.removeEventListener("online", wake);
+      document.removeEventListener("visibilitychange", wake);
+      pollControllerRef.current?.abort();
+    };
+  }, [clearSession, storedSession]);
+
+  const beginAction = useCallback((accessToken: string) => {
+    if (activeTokenRef.current !== accessToken) return null;
+    const generation = ++requestGenerationRef.current;
+    activeActionRef.current = { accessToken, generation };
+    actionPendingRef.current = true;
+    pollControllerRef.current?.abort();
+    return generation;
+  }, []);
+
+  const finishAction = useCallback(
+    (accessToken: string, generation: number) => {
+      const activeAction = activeActionRef.current;
+      if (
+        activeAction?.accessToken !== accessToken ||
+        activeAction.generation !== generation
+      ) {
+        return;
+      }
+      activeActionRef.current = null;
+      actionPendingRef.current = false;
+    },
+    [],
+  );
+
+  const acceptActionRoom = useCallback(
+    (nextRoom: RoomView, accessToken: string, generation: number) => {
+      const activeAction = activeActionRef.current;
+      if (
+        activeTokenRef.current !== accessToken ||
+        activeAction?.accessToken !== accessToken ||
+        activeAction.generation !== generation
+      ) {
+        return;
+      }
+      setRoom(nextRoom);
+      setConnectionError(null);
+    },
+    [],
+  );
+
+  const handleActionError = useCallback(
+    (reason: unknown, accessToken: string, generation: number) => {
+      const activeAction = activeActionRef.current;
+      if (
+        activeTokenRef.current !== accessToken ||
+        activeAction?.accessToken !== accessToken ||
+        activeAction.generation !== generation
+      ) {
+        return;
+      }
+
+      if (
+        reason instanceof ApiError &&
+        (reason.status === 401 || reason.status === 410)
+      ) {
+        clearSession(
+          "Your reconnect key is no longer valid. Join the room again.",
+        );
+        return;
+      }
+
+      if (!(reason instanceof ApiError) || reason.code === "request_timeout") {
+        setConnectionError(
+          reason instanceof ApiError
+            ? "The server is taking too long. Retrying automatically…"
+            : "Connection lost. Retrying automatically…",
+        );
+        setActionError(
+          "We could not confirm that action. The latest room state will appear when you reconnect.",
+        );
+        return;
+      }
+
+      setActionError(errorMessage(reason, "That action did not work."));
+    },
+    [clearSession],
+  );
+
+  const forgetSession = useCallback(() => {
+    if (
+      window.confirm(
+        "Forget this saved seat? This cannot be undone, and the seat will remain in the room.",
+      )
+    ) {
+      clearSession();
+    }
+  }, [clearSession]);
+
+  if (!storedSession) {
     return (
       <Landing
+        notice={landingNotice}
         onSession={(nextSession, nextRoom) => {
-          saveSession(nextSession);
-          setRoom(nextRoom);
+          activateSession(nextSession, nextRoom);
         }}
       />
     );
   }
 
-  if (!room) {
+  if (!session || !room) {
     return (
       <main className="shell centered">
-        <p className="eyebrow">ROOM {session.roomCode}</p>
+        <p className="eyebrow">ROOM {storedSession.roomCode}</p>
         <h1>Finding your table…</h1>
-        {error && <p className="error">{error}</p>}
-        <button className="button secondary" onClick={() => saveSession(null)}>
-          Leave room
-        </button>
+        {connectionError && (
+          <p className="connection-notice" role="status">
+            {connectionError}
+          </p>
+        )}
       </main>
     );
   }
@@ -92,50 +410,83 @@ function App() {
     <Game
       session={session}
       room={room}
-      error={error}
-      onRoom={setRoom}
-      onError={setError}
-      onLeave={() => {
-        saveSession(null);
-        setRoom(null);
-      }}
+      actionError={actionError}
+      connectionError={connectionError}
+      onActionRoom={acceptActionRoom}
+      onActionError={handleActionError}
+      onClearActionError={() => setActionError(null)}
+      onActionStart={beginAction}
+      onActionEnd={finishAction}
+      onLeave={forgetSession}
     />
   );
 }
 
 interface LandingProps {
+  notice: string | null;
   onSession: (session: Session, room: RoomView) => void;
 }
 
-function Landing({ onSession }: LandingProps) {
+function Landing({ notice, onSession }: LandingProps) {
   const [mode, setMode] = useState<"home" | "create" | "join">("home");
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const pendingAttemptRef = useRef<PendingEntryAttempt | null>(null);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
     const normalizedName = name.trim().replace(/\s+/g, " ");
+    const normalizedCode = code.trim().toUpperCase();
+    const fingerprint = JSON.stringify([
+      mode,
+      mode === "join" ? normalizedCode : null,
+      normalizedName,
+    ]);
+    const pendingAttempt =
+      pendingAttemptRef.current?.fingerprint === fingerprint
+        ? pendingAttemptRef.current
+        : {
+            fingerprint,
+            accessToken: createAccessToken(),
+          };
+    pendingAttemptRef.current = pendingAttempt;
+
     try {
       const result =
         mode === "create"
-          ? await api.createRoom(normalizedName)
-          : await api.joinRoom(code.trim().toUpperCase(), normalizedName);
+          ? await api.createRoom(normalizedName, pendingAttempt.accessToken)
+          : await api.joinRoom(
+              normalizedCode,
+              normalizedName,
+              pendingAttempt.accessToken,
+            );
+      if (result.access_token !== pendingAttempt.accessToken) {
+        throw new ApiError(
+          "The server returned a different reconnect key.",
+          502,
+          "access_token_mismatch",
+        );
+      }
+      pendingAttemptRef.current = null;
       onSession(
         {
           roomCode: result.room.code,
           playerId: result.player_id,
-          playerName: normalizedName,
-          isHost: mode === "create",
+          playerName: result.player_name,
+          isHost: result.is_host,
+          accessToken: result.access_token,
         },
         result.room,
       );
     } catch (reason) {
       setError(
-        reason instanceof Error ? reason.message : "Could not enter the room.",
+        reason instanceof ApiError && reason.code === "request_timeout"
+          ? "The server took too long to respond. Try again—the same reconnect key will be reused."
+          : errorMessage(reason, "Could not enter the room."),
       );
     } finally {
       setBusy(false);
@@ -156,6 +507,12 @@ function Landing({ onSession }: LandingProps) {
           with. See what changes when people actually talk.
         </p>
       </section>
+
+      {notice && (
+        <p className="connection-notice landing-notice" role="status">
+          {notice}
+        </p>
+      )}
 
       {mode === "home" ? (
         <section className="action-grid">
@@ -237,13 +594,36 @@ function Landing({ onSession }: LandingProps) {
 interface GameProps {
   session: Session;
   room: RoomView;
-  error: string | null;
-  onRoom: (room: RoomView) => void;
-  onError: (error: string | null) => void;
+  actionError: string | null;
+  connectionError: string | null;
+  onActionRoom: (
+    room: RoomView,
+    accessToken: string,
+    generation: number,
+  ) => void;
+  onActionError: (
+    reason: unknown,
+    accessToken: string,
+    generation: number,
+  ) => void;
+  onClearActionError: () => void;
+  onActionStart: (accessToken: string) => number | null;
+  onActionEnd: (accessToken: string, generation: number) => void;
   onLeave: () => void;
 }
 
-function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
+function Game({
+  session,
+  room,
+  actionError,
+  connectionError,
+  onActionRoom,
+  onActionError,
+  onClearActionError,
+  onActionStart,
+  onActionEnd,
+  onLeave,
+}: GameProps) {
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
 
@@ -251,14 +631,20 @@ function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
     if (pendingRef.current) return;
     pendingRef.current = true;
     setPending(true);
-    onError(null);
+    onClearActionError();
+    const accessToken = session.accessToken;
+    const generation = onActionStart(accessToken);
+    if (generation === null) {
+      pendingRef.current = false;
+      setPending(false);
+      return;
+    }
     try {
-      onRoom(await request());
+      onActionRoom(await request(), accessToken, generation);
     } catch (reason) {
-      onError(
-        reason instanceof Error ? reason.message : "That action did not work.",
-      );
+      onActionError(reason, accessToken, generation);
     } finally {
+      onActionEnd(accessToken, generation);
       pendingRef.current = false;
       setPending(false);
     }
@@ -279,14 +665,29 @@ function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
         </button>
       </header>
 
-      {error && <p className="error floating-error">{error}</p>}
+      {(actionError || connectionError) && (
+        <div className="floating-messages">
+          {actionError && (
+            <p className="error" role="alert">
+              {actionError}
+            </p>
+          )}
+          {connectionError && (
+            <p className="connection-notice" role="status">
+              {connectionError}
+            </p>
+          )}
+        </div>
+      )}
 
       {room.phase === "lobby" && (
         <Lobby
           room={room}
           isHost={session.isHost}
           pending={pending}
-          onStart={() => act(() => api.startRoom(room.code, session.playerId))}
+          onStart={() =>
+            act(() => api.startRoom(room.code, session.accessToken))
+          }
         />
       )}
       {room.phase === "answering" && (
@@ -299,13 +700,13 @@ function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
             act(() =>
               api.submitAnswer(
                 room.code,
-                session.playerId,
+                session.accessToken,
                 position,
                 confidence,
               ),
             )
           }
-          onReveal={() => act(() => api.reveal(room.code, session.playerId))}
+          onReveal={() => act(() => api.reveal(room.code, session.accessToken))}
         />
       )}
       {room.phase === "modifier" && (
@@ -315,9 +716,9 @@ function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
           room={room}
           pending={pending}
           onSubmit={(value) =>
-            act(() => api.submitModifier(room.code, session.playerId, value))
+            act(() => api.submitModifier(room.code, session.accessToken, value))
           }
-          onReveal={() => act(() => api.reveal(room.code, session.playerId))}
+          onReveal={() => act(() => api.reveal(room.code, session.accessToken))}
         />
       )}
       {room.phase === "reveal" && (
@@ -325,14 +726,22 @@ function Game({ session, room, error, onRoom, onError, onLeave }: GameProps) {
           room={room}
           isHost={session.isHost}
           pending={pending}
-          onAdvance={() => act(() => api.advance(room.code, session.playerId))}
+          onAdvance={() =>
+            act(() => api.advance(room.code, session.accessToken))
+          }
         />
       )}
       {room.phase === "complete" && <Complete room={room} />}
 
-      <button className="text-button leave" onClick={onLeave}>
-        Leave room
-      </button>
+      {(room.phase === "lobby" || room.phase === "complete") && (
+        <button
+          className="text-button leave"
+          disabled={pending}
+          onClick={onLeave}
+        >
+          Forget this saved seat
+        </button>
+      )}
     </main>
   );
 }

@@ -11,6 +11,7 @@ Psychology Roulette is not a personality test and does not infer diagnoses or fi
 - 3–8 players is the intended social range; two players are allowed during development.
 - A standard session contains six rounds and should last roughly 20–35 minutes.
 - Players join using a four-letter room code and a display name.
+- Each seat receives a private reconnect credential that survives a browser refresh.
 - The host controls starting and advancing the session.
 - No account is required.
 
@@ -35,7 +36,7 @@ LOBBY
   -> COMPLETE
 ```
 
-Answers are private while the room is in `ANSWERING`. The room snapshot exposes only whether each player has submitted. Positions become visible in `REVEAL`.
+Answers are private while the room is in `ANSWERING`. An authenticated room snapshot exposes only whether each player has submitted. Positions become visible in `REVEAL`.
 
 The selected modifier remains hidden while players choose their positions. A pre-reveal modifier becomes visible only after every position is locked. Modifier submissions remain private until the reveal.
 
@@ -71,6 +72,16 @@ This measures how accurately someone read the group, not whether their personal 
 
 Questions are curated JSON records containing a category, intensity, relevant values, and allowed modifiers. Live AI-generated questions are outside the initial game loop.
 
+## Persistence and reconnect
+
+The server writes the complete room aggregate to a versioned SQLite snapshot after every successful mutation. The snapshot includes the original question pack, players, answers, modifier plan and private submissions, so an active session resumes exactly after a process restart even if curated content later changes.
+
+Creating a room, joining a seat, issuing its credential, and changing game state are transactional operations. Failed rules or database writes do not leave partial rooms or players behind.
+
+The browser generates one high-entropy participant credential for a create or join attempt and sends it as a Bearer credential. Retrying the same operation with the same credential returns the original seat, preventing a lost response from creating an unrecoverable player. The browser stores the credential locally and uses it to restore the server-authoritative player identity. The database stores only a SHA-256 digest. Room reads and actions reject missing, invalid, mismatched-reuse, or cross-room credentials, and request bodies cannot choose another player's identity.
+
+During an active round, the client does not allow a participant to discard the only credential for a required seat. A future authenticated leave or host-removal rule can replace this guard once its effects on incomplete rounds are specified.
+
 ## Deployment boundary
 
-The current four-letter room code and unauthenticated room snapshot are intended for development and trusted local-network play. Before public internet deployment, the server must add unguessable participant or spectator read credentials and request rate limiting so room data cannot be enumerated.
+Participant credentials prevent room snapshots and actions from being read or changed with a room code alone. Room creation remains open, and the public join endpoint still accepts the intentionally short four-letter invitation code plus a self-issued participant credential. Before public internet deployment, rate-limit both operations at the trusted edge, expire or archive abandoned rooms, and consider a higher-entropy invite secret to prevent code enumeration, room-filling abuse, unbounded storage growth, and exhaustion of the short-code namespace.

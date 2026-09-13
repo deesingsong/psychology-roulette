@@ -1,3 +1,5 @@
+import secrets
+
 from fastapi.testclient import TestClient
 
 from psychology_roulette.api import create_app
@@ -5,92 +7,341 @@ from psychology_roulette.domain import Question
 from psychology_roulette.store import RoomStore
 
 
+def _auth(access_token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {access_token}"}
+
+
+def _new_access_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _create_two_player_room(client: TestClient) -> tuple[str, dict, dict]:
+    host_token = _new_access_token()
+    created_response = client.post(
+        "/api/rooms",
+        headers=_auth(host_token),
+        json={"host_name": "Host"},
+    )
+    assert created_response.status_code == 201
+    assert created_response.headers["cache-control"] == "no-store"
+    created = created_response.json()
+    assert created["access_token"] == host_token
+    code = created["room"]["code"]
+
+    guest_token = _new_access_token()
+    joined_response = client.post(
+        f"/api/rooms/{code}/players",
+        headers=_auth(guest_token),
+        json={"name": "Guest"},
+    )
+    assert joined_response.status_code == 201
+    assert joined_response.headers["cache-control"] == "no-store"
+    assert joined_response.json()["access_token"] == guest_token
+    return code, created, joined_response.json()
+
+
+def _assert_invalid_caller_token(response) -> None:
+    assert response.status_code == 401
+    assert response.json() == {"detail": "A valid room access token is required."}
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def _assert_token_reuse_conflict(response) -> None:
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "That access token is already assigned to a different room or participant."
+    }
+
+
+def test_create_and_join_retries_return_the_original_session() -> None:
+    store = RoomStore()
+    client = TestClient(create_app(store))
+    host_token = _new_access_token()
+    create_request = {"host_name": "  Host   Person  "}
+
+    created = client.post("/api/rooms", headers=_auth(host_token), json=create_request)
+    retried_create = client.post(
+        "/api/rooms",
+        headers=_auth(host_token),
+        json={"host_name": "Host Person"},
+    )
+    assert created.status_code == retried_create.status_code == 201
+    assert retried_create.json() == created.json()
+    assert created.json()["access_token"] == host_token
+    code = created.json()["room"]["code"]
+
+    guest_token = _new_access_token()
+    joined = client.post(
+        f"/api/rooms/{code}/players",
+        headers=_auth(guest_token),
+        json={"name": "  Guest   Person "},
+    )
+    retried_join = client.post(
+        f"/api/rooms/{code.lower()}/players",
+        headers=_auth(guest_token),
+        json={"name": "Guest Person"},
+    )
+    assert joined.status_code == retried_join.status_code == 201
+    assert retried_join.json() == joined.json()
+    assert joined.json()["access_token"] == guest_token
+
+    stored_room = store.get(code)
+    assert [player.name for player in stored_room.players.values()] == [
+        "Host Person",
+        "Guest Person",
+    ]
+
+
+def test_create_and_join_require_canonical_strong_caller_tokens() -> None:
+    client = TestClient(create_app(RoomStore()))
+
+    _assert_invalid_caller_token(client.post("/api/rooms", json={"host_name": "Host"}))
+    _assert_invalid_caller_token(
+        client.post(
+            "/api/rooms",
+            headers=_auth("too-short"),
+            json={"host_name": "Host"},
+        )
+    )
+
+    host_token = _new_access_token()
+    created = client.post(
+        "/api/rooms",
+        headers=_auth(host_token),
+        json={"host_name": "Host"},
+    )
+    assert created.status_code == 201
+    code = created.json()["room"]["code"]
+
+    _assert_invalid_caller_token(client.post(f"/api/rooms/{code}/players", json={"name": "Guest"}))
+    _assert_invalid_caller_token(
+        client.post(
+            f"/api/rooms/{code}/players",
+            headers=_auth("still-too-short"),
+            json={"name": "Guest"},
+        )
+    )
+
+
+def test_caller_token_cannot_be_reused_for_another_identity() -> None:
+    client = TestClient(create_app(RoomStore()))
+    host_token = _new_access_token()
+    first_room = client.post(
+        "/api/rooms",
+        headers=_auth(host_token),
+        json={"host_name": "Host"},
+    ).json()
+    other_room = client.post(
+        "/api/rooms",
+        headers=_auth(_new_access_token()),
+        json={"host_name": "Other host"},
+    ).json()
+    first_code = first_room["room"]["code"]
+    other_code = other_room["room"]["code"]
+
+    _assert_token_reuse_conflict(
+        client.post(
+            "/api/rooms",
+            headers=_auth(host_token),
+            json={"host_name": "Changed host"},
+        )
+    )
+    _assert_token_reuse_conflict(
+        client.post(
+            f"/api/rooms/{first_code}/players",
+            headers=_auth(host_token),
+            json={"name": "Host"},
+        )
+    )
+
+    guest_token = _new_access_token()
+    joined = client.post(
+        f"/api/rooms/{first_code}/players",
+        headers=_auth(guest_token),
+        json={"name": "Guest"},
+    )
+    assert joined.status_code == 201
+
+    _assert_token_reuse_conflict(
+        client.post(
+            f"/api/rooms/{first_code}/players",
+            headers=_auth(guest_token),
+            json={"name": "Changed guest"},
+        )
+    )
+    _assert_token_reuse_conflict(
+        client.post(
+            f"/api/rooms/{other_code}/players",
+            headers=_auth(guest_token),
+            json={"name": "Guest"},
+        )
+    )
+    _assert_token_reuse_conflict(
+        client.post(
+            "/api/rooms",
+            headers=_auth(guest_token),
+            json={"host_name": "Guest"},
+        )
+    )
+
+
 def test_room_api_hides_answers_until_reveal() -> None:
     client = TestClient(create_app(RoomStore()))
-    created = client.post("/api/rooms", json={"host_name": "Host"}).json()
-    code = created["room"]["code"]
-    host_id = created["player_id"]
-    assert "modifier_seed" not in created["room"]
-    guest = client.post(f"/api/rooms/{code}/players", json={"name": "Guest"}).json()
+    code, host, guest = _create_two_player_room(client)
+    assert "modifier_seed" not in host["room"]
 
-    response = client.post(f"/api/rooms/{code}/start", json={"player_id": host_id})
+    response = client.post(f"/api/rooms/{code}/start", headers=_auth(host["access_token"]))
     assert response.status_code == 200
 
     host_answer = client.post(
         f"/api/rooms/{code}/answers",
-        json={"player_id": host_id, "position": 67, "confidence": 80},
+        headers=_auth(host["access_token"]),
+        json={"position": 67, "confidence": 80},
     )
+    assert host_answer.status_code == 200
     assert host_answer.json()["revealed_answers"] is None
 
-    client.post(
+    guest_answer = client.post(
         f"/api/rooms/{code}/answers",
-        json={"player_id": guest["player_id"], "position": -33, "confidence": 40},
+        headers=_auth(guest["access_token"]),
+        json={"position": -33, "confidence": 40},
     )
-    revealed = client.post(f"/api/rooms/{code}/reveal", json={"player_id": host_id})
+    assert guest_answer.status_code == 200
+    revealed = client.post(
+        f"/api/rooms/{code}/reveal",
+        headers=_auth(host["access_token"]),
+    )
 
     assert revealed.status_code == 200
     assert len(revealed.json()["revealed_answers"]) == 2
     assert revealed.json()["summary"]["average_position"] == 17.0
 
 
-def test_unknown_room_returns_conflict() -> None:
+def test_api_requires_tokens_and_isolates_rooms() -> None:
     client = TestClient(create_app(RoomStore()))
-    response = client.get("/api/rooms/NOPE")
+    first_code, first_host, first_guest = _create_two_player_room(client)
+    second = client.post(
+        "/api/rooms",
+        headers=_auth(_new_access_token()),
+        json={"host_name": "Other host"},
+    ).json()
+    second_code = second["room"]["code"]
 
-    assert response.status_code == 409
-    assert response.json() == {"detail": "Room not found."}
+    missing_token = client.get(f"/api/rooms/{first_code}")
+    assert missing_token.status_code == 401
+    assert missing_token.headers["www-authenticate"] == "Bearer"
+    assert (
+        client.get(
+            f"/api/rooms/{first_code}",
+            headers=_auth("not-a-valid-token"),
+        ).status_code
+        == 401
+    )
+    assert (
+        client.get(
+            f"/api/rooms/{first_code}",
+            headers=_auth(first_host["player_id"]),
+        ).status_code
+        == 401
+    )
+    assert (
+        client.get(
+            f"/api/rooms/{second_code}",
+            headers=_auth(first_host["access_token"]),
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(
+            f"/api/rooms/{second_code}/start",
+            headers=_auth(first_host["access_token"]),
+        ).status_code
+        == 403
+    )
+
+    resumed = client.get("/api/session", headers=_auth(first_guest["access_token"]))
+    assert resumed.status_code == 200
+    assert resumed.headers["cache-control"] == "no-store"
+    assert resumed.json()["player_id"] == first_guest["player_id"]
+    assert resumed.json()["player_name"] == "Guest"
+    assert resumed.json()["is_host"] is False
+    assert resumed.json()["room"]["code"] == first_code
+    assert "access_token" not in resumed.json()
+
+
+def test_guest_token_cannot_perform_host_actions() -> None:
+    client = TestClient(create_app(RoomStore()))
+    code, host, guest = _create_two_player_room(client)
+
+    rejected = client.post(f"/api/rooms/{code}/start", headers=_auth(guest["access_token"]))
+    assert rejected.status_code == 409
+    assert rejected.json() == {"detail": "Only the host can do that."}
+
+    room = client.get(f"/api/rooms/{code}", headers=_auth(host["access_token"]))
+    assert room.json()["phase"] == "lobby"
+    assert (
+        client.post(
+            f"/api/rooms/{code}/start",
+            headers=_auth(host["access_token"]),
+        ).status_code
+        == 200
+    )
 
 
 def _client_at_second_round(modifier_type: str) -> tuple[TestClient, str, str, str]:
     store = RoomStore()
     client = TestClient(create_app(store))
-    created = client.post("/api/rooms", json={"host_name": "Host"}).json()
-    code = created["room"]["code"]
-    host_id = created["player_id"]
-    guest = client.post(f"/api/rooms/{code}/players", json={"name": "Guest"}).json()
-    guest_id = guest["player_id"]
+    code, host, guest = _create_two_player_room(client)
+    host_token = host["access_token"]
+    guest_token = guest["access_token"]
 
-    room = store.get(code)
-    room.modifier_chance = 1
-    room.modifier_seed = f"api-{modifier_type}"
-    room.questions = [
-        Question(
-            id=f"api-q{number}",
-            prompt=f"API question {number}",
-            category="ethics",
-            intensity=1,
-            values=("fairness", "autonomy", "care"),
-            modifiers_allowed=(modifier_type,) if number == 2 else (),
-        )
-        for number in range(1, 7)
-    ]
+    def configure_modifier_room(room, _player_id: str) -> None:
+        room.modifier_chance = 1
+        room.modifier_seed = f"api-{modifier_type}"
+        room.questions = [
+            Question(
+                id=f"api-q{number}",
+                prompt=f"API question {number}",
+                category="ethics",
+                intensity=1,
+                values=("fairness", "autonomy", "care"),
+                modifiers_allowed=(modifier_type,) if number == 2 else (),
+            )
+            for number in range(1, 7)
+        ]
 
-    assert client.post(f"/api/rooms/{code}/start", json={"player_id": host_id}).status_code == 200
+    store.mutate(code, host_token, configure_modifier_room)
+
+    assert client.post(f"/api/rooms/{code}/start", headers=_auth(host_token)).status_code == 200
     client.post(
         f"/api/rooms/{code}/answers",
-        json={"player_id": host_id, "position": 0, "confidence": 50},
+        headers=_auth(host_token),
+        json={"position": 0, "confidence": 50},
     )
     client.post(
         f"/api/rooms/{code}/answers",
-        json={"player_id": guest_id, "position": 33, "confidence": 60},
+        headers=_auth(guest_token),
+        json={"position": 33, "confidence": 60},
     )
-    client.post(f"/api/rooms/{code}/reveal", json={"player_id": host_id})
-    advanced = client.post(f"/api/rooms/{code}/advance", json={"player_id": host_id})
+    client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token))
+    advanced = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token))
     assert advanced.status_code == 200
     assert advanced.json()["round_number"] == 2
     assert advanced.json()["modifier"] is None
-    return client, code, host_id, guest_id
+    return client, code, host_token, guest_token
 
 
 def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
-    client, code, host_id, guest_id = _client_at_second_round("predict_room")
+    client, code, host_token, guest_token = _client_at_second_round("predict_room")
     client.post(
         f"/api/rooms/{code}/answers",
-        json={"player_id": host_id, "position": 100, "confidence": 90},
+        headers=_auth(host_token),
+        json={"position": 100, "confidence": 90},
     )
     modifier_phase = client.post(
         f"/api/rooms/{code}/answers",
-        json={"player_id": guest_id, "position": 0, "confidence": 40},
+        headers=_auth(guest_token),
+        json={"position": 0, "confidence": 40},
     )
 
     payload = modifier_phase.json()
@@ -112,13 +363,15 @@ def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
 
     invalid_number = client.post(
         f"/api/rooms/{code}/modifier-submissions",
-        json={"player_id": host_id, "value": 12.5},
+        headers=_auth(host_token),
+        json={"value": 12.5},
     )
     assert invalid_number.status_code == 422
 
     host_prediction = client.post(
         f"/api/rooms/{code}/modifier-submissions",
-        json={"player_id": host_id, "value": 67},
+        headers=_auth(host_token),
+        json={"value": 67},
     ).json()
     assert host_prediction["modifier"]["submissions_count"] == 1
     assert host_prediction["modifier"]["results"] is None
@@ -126,15 +379,16 @@ def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
         "has_modifier_submitted"
     ]
 
-    early_reveal = client.post(f"/api/rooms/{code}/reveal", json={"player_id": host_id})
+    early_reveal = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token))
     assert early_reveal.status_code == 409
     assert "Every player must complete" in early_reveal.json()["detail"]
 
     client.post(
         f"/api/rooms/{code}/modifier-submissions",
-        json={"player_id": guest_id, "value": -100},
+        headers=_auth(guest_token),
+        json={"value": -100},
     )
-    revealed = client.post(f"/api/rooms/{code}/reveal", json={"player_id": host_id})
+    revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token))
     assert revealed.status_code == 200
     assert revealed.json()["modifier"]["results"] == [
         {"player_name": "Host", "value": 67, "score": 92},
@@ -143,32 +397,36 @@ def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
 
 
 def test_secret_principle_api_reveals_selections_only_at_reveal() -> None:
-    client, code, host_id, guest_id = _client_at_second_round("secret_principle")
-    for player_id, position in ((host_id, -33), (guest_id, 67)):
+    client, code, host_token, guest_token = _client_at_second_round("secret_principle")
+    for token, position in ((host_token, -33), (guest_token, 67)):
         response = client.post(
             f"/api/rooms/{code}/answers",
-            json={"player_id": player_id, "position": position, "confidence": 70},
+            headers=_auth(token),
+            json={"position": position, "confidence": 70},
         )
     assert response.json()["phase"] == "modifier"
     assert response.json()["modifier"]["options"] == ["fairness", "autonomy", "care"]
 
     invalid = client.post(
         f"/api/rooms/{code}/modifier-submissions",
-        json={"player_id": host_id, "value": "Fairness"},
+        headers=_auth(host_token),
+        json={"value": "Fairness"},
     )
     assert invalid.status_code == 409
 
     first_submission = client.post(
         f"/api/rooms/{code}/modifier-submissions",
-        json={"player_id": host_id, "value": "fairness"},
+        headers=_auth(host_token),
+        json={"value": "fairness"},
     )
     assert first_submission.json()["modifier"]["results"] is None
     client.post(
         f"/api/rooms/{code}/modifier-submissions",
-        json={"player_id": guest_id, "value": "care"},
+        headers=_auth(guest_token),
+        json={"value": "care"},
     )
 
-    revealed = client.post(f"/api/rooms/{code}/reveal", json={"player_id": host_id})
+    revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token))
     assert revealed.json()["modifier"]["results"] == [
         {"player_name": "Host", "value": "fairness", "score": None},
         {"player_name": "Guest", "value": "care", "score": None},
@@ -176,19 +434,21 @@ def test_secret_principle_api_reveals_selections_only_at_reveal() -> None:
 
 
 def test_devils_advocate_api_is_hidden_until_the_reveal() -> None:
-    client, code, host_id, guest_id = _client_at_second_round("devils_advocate")
+    client, code, host_token, guest_token = _client_at_second_round("devils_advocate")
     client.post(
         f"/api/rooms/{code}/answers",
-        json={"player_id": host_id, "position": -67, "confidence": 55},
+        headers=_auth(host_token),
+        json={"position": -67, "confidence": 55},
     )
     answered = client.post(
         f"/api/rooms/{code}/answers",
-        json={"player_id": guest_id, "position": 67, "confidence": 75},
+        headers=_auth(guest_token),
+        json={"position": 67, "confidence": 75},
     )
     assert answered.json()["phase"] == "answering"
     assert answered.json()["modifier"] is None
 
-    revealed = client.post(f"/api/rooms/{code}/reveal", json={"player_id": host_id})
+    revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token))
     modifier = revealed.json()["modifier"]
     assert modifier["type"] == "devils_advocate"
     assert modifier["timing"] == "post_reveal"
@@ -201,18 +461,11 @@ def test_devils_advocate_api_is_hidden_until_the_reveal() -> None:
 
 def test_default_six_round_api_session_reaches_completion() -> None:
     client = TestClient(create_app(RoomStore()))
-    created = client.post("/api/rooms", json={"host_name": "Host"}).json()
-    code = created["room"]["code"]
-    host_id = created["player_id"]
-    guest_id = client.post(
-        f"/api/rooms/{code}/players",
-        json={"name": "Guest"},
-    ).json()["player_id"]
+    code, host, guest = _create_two_player_room(client)
+    host_token = host["access_token"]
+    guest_token = guest["access_token"]
 
-    room = client.post(
-        f"/api/rooms/{code}/start",
-        json={"player_id": host_id},
-    ).json()
+    room = client.post(f"/api/rooms/{code}/start", headers=_auth(host_token)).json()
     modifier_rounds = 0
 
     for round_number in range(1, 7):
@@ -221,40 +474,37 @@ def test_default_six_round_api_session_reaches_completion() -> None:
 
         client.post(
             f"/api/rooms/{code}/answers",
-            json={"player_id": host_id, "position": 67, "confidence": 80},
+            headers=_auth(host_token),
+            json={"position": 67, "confidence": 80},
         )
         room = client.post(
             f"/api/rooms/{code}/answers",
-            json={"player_id": guest_id, "position": -33, "confidence": 60},
+            headers=_auth(guest_token),
+            json={"position": -33, "confidence": 60},
         ).json()
 
         if room["phase"] == "modifier":
             modifier_rounds += 1
-            modifier = room["modifier"]
-            submission_value = modifier["options"][0]
+            submission_value = room["modifier"]["options"][0]
             client.post(
                 f"/api/rooms/{code}/modifier-submissions",
-                json={"player_id": host_id, "value": submission_value},
+                headers=_auth(host_token),
+                json={"value": submission_value},
             )
             room = client.post(
                 f"/api/rooms/{code}/modifier-submissions",
-                json={"player_id": guest_id, "value": submission_value},
+                headers=_auth(guest_token),
+                json={"value": submission_value},
             ).json()
 
-        revealed = client.post(
-            f"/api/rooms/{code}/reveal",
-            json={"player_id": host_id},
-        )
+        revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token))
         assert revealed.status_code == 200
         room = revealed.json()
         assert room["phase"] == "reveal"
         if room["modifier"] is not None:
             modifier_rounds += int(room["modifier"]["timing"] == "post_reveal")
 
-        room = client.post(
-            f"/api/rooms/{code}/advance",
-            json={"player_id": host_id},
-        ).json()
+        room = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
 
     assert room["phase"] == "complete"
     assert modifier_rounds >= 1
