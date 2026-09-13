@@ -27,11 +27,13 @@ interface StoredSession {
   version: typeof SESSION_STORAGE_VERSION;
   roomCode: string;
   accessToken: string;
+  inviteToken: string | null;
 }
 
 interface PendingEntryAttempt {
   fingerprint: string;
   accessToken: string;
+  inviteToken: string | null;
 }
 
 interface ActiveAction {
@@ -76,6 +78,10 @@ function readStoredSession(): StoredSession | null {
         version: SESSION_STORAGE_VERSION,
         roomCode: parsed.roomCode,
         accessToken: parsed.accessToken,
+        inviteToken:
+          "inviteToken" in parsed && typeof parsed.inviteToken === "string"
+            ? parsed.inviteToken
+            : null,
       };
     }
 
@@ -110,6 +116,28 @@ function isAbortError(reason: unknown) {
 
 function errorMessage(reason: unknown, fallback: string) {
   return reason instanceof Error ? reason.message : fallback;
+}
+
+function invitationFromUrl() {
+  const parameters = new URLSearchParams(window.location.search);
+  const roomCode = (parameters.get("room") ?? "").trim().toUpperCase();
+  const inviteToken = parameters.get("invite");
+  if (
+    !/^[A-Z]{4}$/.test(roomCode) ||
+    !inviteToken ||
+    inviteToken.length !== 43
+  ) {
+    return null;
+  }
+  return { roomCode, inviteToken };
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  window.prompt("Copy this link:", value);
 }
 
 function App() {
@@ -153,6 +181,7 @@ function App() {
         version: SESSION_STORAGE_VERSION,
         roomCode: nextSession.roomCode,
         accessToken: nextSession.accessToken,
+        inviteToken: nextSession.inviteToken,
       } satisfies StoredSession;
       const wasSaved = writeStoredSession(stored);
       setStoredSession(stored);
@@ -218,6 +247,7 @@ function App() {
           playerName: restored.player_name,
           isHost: restored.is_host,
           accessToken: storedSession.accessToken,
+          inviteToken: storedSession.inviteToken,
         };
         setSession(nextSession);
         setRoom(restored.room);
@@ -428,9 +458,12 @@ interface LandingProps {
 }
 
 function Landing({ notice, onSession }: LandingProps) {
-  const [mode, setMode] = useState<"home" | "create" | "join">("home");
+  const invitation = useMemo(() => invitationFromUrl(), []);
+  const [mode, setMode] = useState<"home" | "create" | "join">(
+    invitation ? "join" : "home",
+  );
   const [name, setName] = useState("");
-  const [code, setCode] = useState("");
+  const [code, setCode] = useState(invitation?.roomCode ?? "");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const pendingAttemptRef = useRef<PendingEntryAttempt | null>(null);
@@ -445,6 +478,7 @@ function Landing({ notice, onSession }: LandingProps) {
       mode,
       mode === "join" ? normalizedCode : null,
       normalizedName,
+      mode === "join" ? invitation?.inviteToken : null,
     ]);
     const pendingAttempt =
       pendingAttemptRef.current?.fingerprint === fingerprint
@@ -452,17 +486,26 @@ function Landing({ notice, onSession }: LandingProps) {
         : {
             fingerprint,
             accessToken: createAccessToken(),
+            inviteToken:
+              mode === "create"
+                ? createAccessToken()
+                : (invitation?.inviteToken ?? null),
           };
     pendingAttemptRef.current = pendingAttempt;
 
     try {
       const result =
         mode === "create"
-          ? await api.createRoom(normalizedName, pendingAttempt.accessToken)
+          ? await api.createRoom(
+              normalizedName,
+              pendingAttempt.accessToken,
+              pendingAttempt.inviteToken ?? createAccessToken(),
+            )
           : await api.joinRoom(
               normalizedCode,
               normalizedName,
               pendingAttempt.accessToken,
+              pendingAttempt.inviteToken,
             );
       if (result.access_token !== pendingAttempt.accessToken) {
         throw new ApiError(
@@ -471,7 +514,19 @@ function Landing({ notice, onSession }: LandingProps) {
           "access_token_mismatch",
         );
       }
+      if (
+        mode === "create" &&
+        (!result.invite_token ||
+          result.invite_token !== pendingAttempt.inviteToken)
+      ) {
+        throw new ApiError(
+          "The server returned a different private invitation.",
+          502,
+          "invite_token_mismatch",
+        );
+      }
       pendingAttemptRef.current = null;
+      window.history.replaceState(null, "", window.location.pathname);
       onSession(
         {
           roomCode: result.room.code,
@@ -479,6 +534,10 @@ function Landing({ notice, onSession }: LandingProps) {
           playerName: result.player_name,
           isHost: result.is_host,
           accessToken: result.access_token,
+          inviteToken:
+            mode === "create"
+              ? (result.invite_token ?? null)
+              : pendingAttempt.inviteToken,
         },
         result.room,
       );
@@ -549,20 +608,25 @@ function Landing({ notice, onSession }: LandingProps) {
             {mode === "create" ? "What should we call you?" : "Enter the room"}
           </h2>
           {mode === "join" && (
-            <label>
-              Room code
-              <input
-                className="code-input"
-                value={code}
-                onChange={(event) =>
-                  setCode(event.target.value.slice(0, 4).toUpperCase())
-                }
-                placeholder="KJDM"
-                minLength={4}
-                maxLength={4}
-                required
-              />
-            </label>
+            <>
+              {invitation && (
+                <p className="invite-notice">Private invite link verified.</p>
+              )}
+              <label>
+                Room code
+                <input
+                  className="code-input"
+                  value={code}
+                  onChange={(event) =>
+                    setCode(event.target.value.slice(0, 4).toUpperCase())
+                  }
+                  placeholder="KJDM"
+                  minLength={4}
+                  maxLength={4}
+                  required
+                />
+              </label>
+            </>
           )}
           <label>
             Display name
@@ -627,6 +691,17 @@ function Game({
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
 
+  const copyInviteLink = () => {
+    if (!session.inviteToken) return;
+    const inviteUrl = new URL(window.location.href);
+    inviteUrl.search = new URLSearchParams({
+      room: room.code,
+      invite: session.inviteToken,
+    }).toString();
+    inviteUrl.hash = "";
+    void copyText(inviteUrl.toString());
+  };
+
   const act = async (request: () => Promise<RoomView>) => {
     if (pendingRef.current) return;
     pendingRef.current = true;
@@ -657,12 +732,14 @@ function Game({
           <span className="brand-mark">PR</span>
           <span>PSYCHOLOGY ROULETTE</span>
         </div>
-        <button
-          className="room-chip"
-          onClick={() => navigator.clipboard.writeText(room.code)}
-        >
+        <button className="room-chip" onClick={() => void copyText(room.code)}>
           ROOM <strong>{room.code}</strong>
         </button>
+        {session.isHost && session.inviteToken && (
+          <button className="room-chip invite-chip" onClick={copyInviteLink}>
+            COPY PRIVATE INVITE
+          </button>
+        )}
       </header>
 
       {(actionError || connectionError) && (
@@ -722,6 +799,30 @@ function Game({
         />
       )}
       {room.phase === "reveal" && (
+        <Reveal
+          room={room}
+          isHost={session.isHost}
+          pending={pending}
+          onAdvance={() =>
+            act(() => api.advance(room.code, session.accessToken))
+          }
+        />
+      )}
+      {room.phase === "follow_up" && (
+        <FollowUpStage
+          key={room.round_number}
+          session={session}
+          room={room}
+          pending={pending}
+          onSubmit={(value) =>
+            act(() => api.submitModifier(room.code, session.accessToken, value))
+          }
+          onReveal={() =>
+            act(() => api.advance(room.code, session.accessToken))
+          }
+        />
+      )}
+      {room.phase === "follow_up_reveal" && (
         <Reveal
           room={room}
           isHost={session.isHost}
@@ -1067,6 +1168,151 @@ function ModifierStage({
   );
 }
 
+function FollowUpStage({
+  session,
+  room,
+  pending,
+  onSubmit,
+  onReveal,
+}: {
+  session: Session;
+  room: RoomView;
+  pending: boolean;
+  onSubmit: (value: number | string) => void;
+  onReveal: () => void;
+}) {
+  const [position, setPosition] = useState<number | null>(null);
+  const [steelman, setSteelman] = useState("");
+  const modifier = room.modifier;
+  const me = room.players.find((player) => player.name === session.playerName);
+  const everyoneSubmitted =
+    modifier !== null &&
+    modifier.submissions_count >= modifier.required_submissions;
+
+  if (!modifier) {
+    return (
+      <section className="stage modifier-stage">
+        <p className="eyebrow">AFTER THE DISCUSSION</p>
+        <h1>Preparing the follow-up...</h1>
+      </section>
+    );
+  }
+
+  const isSteelmanWriter =
+    modifier.type === "steelman" &&
+    modifier.target_player_name === session.playerName;
+  const shouldSubmit = modifier.type === "change_my_mind" || isSteelmanWriter;
+
+  return (
+    <section className="stage modifier-stage follow-up-stage">
+      <div className="modifier-heading">
+        <span className="modifier-badge">AFTER THE DISCUSSION</span>
+        <p className="eyebrow">ROUND {room.round_number}</p>
+        <h1>{modifier.title}</h1>
+        <p className="lede">{modifier.instructions}</p>
+      </div>
+
+      {modifier.type === "steelman" && (
+        <div className="modifier-question">
+          <span>THE HANDOFF</span>
+          <p>
+            <strong>{modifier.target_player_name}</strong> will steelman{" "}
+            <strong>{modifier.source_player_name}</strong>'s position.
+          </p>
+        </div>
+      )}
+
+      {!shouldSubmit ? (
+        <div className="submitted-panel modifier-wait">
+          <span className="pulse violet-pulse" />
+          <h2>Listen for a fair restatement.</h2>
+          <p>{modifier.target_player_name} is writing the steelman.</p>
+        </div>
+      ) : me?.has_modifier_submitted ? (
+        <div className="submitted-panel modifier-wait">
+          <span className="pulse violet-pulse" />
+          <h2>Follow-up locked.</h2>
+          <p>
+            {modifier.submissions_count} of {modifier.required_submissions}{" "}
+            responses are in.
+          </p>
+        </div>
+      ) : modifier.type === "steelman" ? (
+        <div className="answer-panel modifier-input">
+          <label className="steelman-field">
+            <span>YOUR STRONGEST FAIR RESTATEMENT</span>
+            <textarea
+              value={steelman}
+              maxLength={280}
+              rows={5}
+              disabled={pending}
+              onChange={(event) => setSteelman(event.target.value)}
+              placeholder="State their reasoning in terms they could endorse..."
+            />
+            <small>{steelman.trim().length}/280</small>
+          </label>
+          <button
+            className="button primary wide"
+            disabled={!steelman.trim() || pending}
+            onClick={() => onSubmit(steelman)}
+          >
+            Lock the steelman
+          </button>
+        </div>
+      ) : (
+        <div className="answer-panel modifier-input">
+          <div className="scale-labels">
+            <span>STRONGLY DISAGREE</span>
+            <span>STRONGLY AGREE</span>
+          </div>
+          <div className="position-grid">
+            {POSITIONS.map((option) => (
+              <button
+                className={
+                  position === option.value ? "position active" : "position"
+                }
+                key={option.value}
+                onClick={() => setPosition(option.value)}
+                aria-label={option.short}
+                aria-pressed={position === option.value}
+                disabled={pending}
+              >
+                <strong>{option.mark}</strong>
+                <span>{option.short}</span>
+              </button>
+            ))}
+          </div>
+          <button
+            className="button primary wide"
+            disabled={position === null || pending}
+            onClick={() => position !== null && onSubmit(position)}
+          >
+            Lock my new position
+          </button>
+        </div>
+      )}
+
+      {session.isHost && everyoneSubmitted ? (
+        <button
+          className="button primary wide"
+          disabled={pending}
+          onClick={onReveal}
+        >
+          {modifier.type === "steelman"
+            ? "Reveal the steelman"
+            : "Reveal what moved"}
+        </button>
+      ) : (
+        <p className="waiting-note">
+          {everyoneSubmitted
+            ? "The host will reveal the follow-up."
+            : "Responses stay private until everyone required has locked in."}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function Reveal({
   room,
   isHost,
@@ -1085,9 +1331,23 @@ function Reveal({
       ),
     [room.revealed_answers],
   );
+  const isFollowUpReveal = room.phase === "follow_up_reveal";
+  const advanceLabel = isFollowUpReveal
+    ? room.round_number === room.round_count
+      ? "See the final table"
+      : "Next round"
+    : room.modifier?.type === "steelman"
+      ? "Begin the steelman"
+      : room.modifier?.type === "change_my_mind"
+        ? "Poll the room again"
+        : room.round_number === room.round_count
+          ? "See the final table"
+          : "Next round";
   return (
     <section className="stage reveal-stage">
-      <p className="eyebrow">THE ROOM HAS SPOKEN</p>
+      <p className="eyebrow">
+        {isFollowUpReveal ? "THE FOLLOW-UP IS IN" : "THE ROOM HAS SPOKEN"}
+      </p>
       <h1>{room.question?.prompt}</h1>
       <RevealModifierCard room={room} />
       <div className="reveal-axis">
@@ -1123,22 +1383,22 @@ function Reveal({
           <strong>{room.summary?.average_confidence ?? 0}%</strong>
         </article>
       </div>
-      <div className="discussion-card">
-        <span>DISCUSSION PROMPT</span>
-        <p>
-          Who is furthest from the room—and what value is their answer
-          protecting?
-        </p>
-      </div>
+      {!isFollowUpReveal && (
+        <div className="discussion-card">
+          <span>DISCUSSION PROMPT</span>
+          <p>
+            Who is furthest from the room—and what value is their answer
+            protecting?
+          </p>
+        </div>
+      )}
       {isHost ? (
         <button
           className="button primary wide"
           disabled={pending}
           onClick={onAdvance}
         >
-          {room.round_number === room.round_count
-            ? "See the final table"
-            : "Next round"}
+          {advanceLabel}
         </button>
       ) : (
         <p className="waiting-note">
@@ -1159,6 +1419,77 @@ function RevealModifierCard({ room }: { room: RoomView }) {
         <span className="modifier-badge">DEVIL'S ADVOCATE</span>
         <h2>{modifier.target_player_name}, the wheel chose you.</h2>
         <p>{modifier.instructions}</p>
+      </article>
+    );
+  }
+
+  if (modifier.type === "steelman") {
+    const result = modifier.results?.[0];
+    return (
+      <article className="reveal-modifier steelman-card">
+        <span className="modifier-badge">STEELMAN</span>
+        {room.phase === "follow_up_reveal" && result ? (
+          <>
+            <h2>
+              {modifier.target_player_name} on {modifier.source_player_name}'s
+              view
+            </h2>
+            <blockquote>{String(result.value)}</blockquote>
+          </>
+        ) : (
+          <>
+            <h2>
+              {modifier.target_player_name}, listen closely to{" "}
+              {modifier.source_player_name}.
+            </h2>
+            <p>
+              Discuss the question first. Then the selected player will write
+              the strongest fair version of that position.
+            </p>
+          </>
+        )}
+      </article>
+    );
+  }
+
+  if (modifier.type === "change_my_mind") {
+    if (room.phase !== "follow_up_reveal") {
+      return (
+        <article className="reveal-modifier">
+          <span className="modifier-badge">CHANGE MY MIND</span>
+          <h2>Talk first. Then answer once more.</h2>
+          <p>
+            Everyone will privately choose again after the discussion. Movement
+            is information, not a score.
+          </p>
+        </article>
+      );
+    }
+    return (
+      <article className="reveal-modifier">
+        <span className="modifier-badge">CHANGE MY MIND</span>
+        <h2>What moved?</h2>
+        <div className="modifier-result-grid movement-grid">
+          {(modifier.results ?? []).map((result) => {
+            const original = room.revealed_answers?.find(
+              (answer) => answer.player_name === result.player_name,
+            )?.position;
+            return (
+              <div key={result.player_name}>
+                <strong>{result.player_name}</strong>
+                <span>
+                  {formatPosition(original)} to{" "}
+                  {formatPosition(Number(result.value))}
+                </span>
+                <small>
+                  {result.movement === 0
+                    ? "held position"
+                    : `${result.movement} points moved`}
+                </small>
+              </div>
+            );
+          })}
+        </div>
       </article>
     );
   }
@@ -1189,13 +1520,88 @@ function RevealModifierCard({ room }: { room: RoomView }) {
 }
 
 function Complete({ room }: { room: RoomView }) {
+  const summary = room.session_summary;
+  if (summary) {
+    return (
+      <section className="stage complete-stage">
+        <p className="eyebrow">SESSION COMPLETE</p>
+        <h1>Tonight's table</h1>
+        <p className="lede">
+          {summary.rounds_completed} rounds, mapped without diagnosing anyone.
+        </p>
+        <div className="stat-grid final-stats">
+          <article>
+            <span>TABLE AVERAGE</span>
+            <strong>{formatPosition(summary.overall_average_position)}</strong>
+          </article>
+          <article>
+            <span>WIDEST ROUND</span>
+            <strong>#{summary.widest_round_number}</strong>
+          </article>
+          <article>
+            <span>CHANGED ANSWERS</span>
+            <strong>{summary.total_position_changes}</strong>
+          </article>
+        </div>
+        <div className="round-history">
+          <h2>The table across rounds</h2>
+          {summary.rounds.map((item) => (
+            <article key={item.number}>
+              <span>R{item.number}</span>
+              <div>
+                <strong>{item.prompt}</strong>
+                <small>
+                  average {formatPosition(item.average_position)} / range{" "}
+                  {item.position_range}
+                </small>
+              </div>
+              <i style={{ left: `${(item.average_position + 100) / 2}%` }} />
+            </article>
+          ))}
+        </div>
+        <div className="player-summary-grid">
+          {summary.players.map((player) => (
+            <article className="player-summary-card" key={player.player_name}>
+              <span>{player.title}</span>
+              <h2>{player.player_name}</h2>
+              <p>{player.title_description}</p>
+              <dl>
+                <div>
+                  <dt>Average</dt>
+                  <dd>{formatPosition(player.average_position)}</dd>
+                </div>
+                <div>
+                  <dt>Confidence</dt>
+                  <dd>{player.average_confidence}%</dd>
+                </div>
+                <div>
+                  <dt>Room distance</dt>
+                  <dd>{player.average_room_distance}</dd>
+                </div>
+                <div>
+                  <dt>Position span</dt>
+                  <dd>{player.position_span}</dd>
+                </div>
+              </dl>
+              {player.prediction_score !== null && (
+                <small>Room-reading score: {player.prediction_score}</small>
+              )}
+              {player.movement_total > 0 && (
+                <small>Total follow-up movement: {player.movement_total}</small>
+              )}
+            </article>
+          ))}
+        </div>
+      </section>
+    );
+  }
   return (
     <section className="stage complete-stage">
       <p className="eyebrow">SESSION COMPLETE</p>
       <h1>Tonight's table</h1>
       <p className="lede">
-        You finished {room.round_count} rounds. Session titles and cross-round
-        movement analytics are the next feature entering the engine.
+        You finished {room.round_count} rounds. The final table is being
+        prepared.
       </p>
       <div className="player-grid">
         {room.players.map((player) => (

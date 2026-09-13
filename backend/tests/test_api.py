@@ -2,7 +2,7 @@ import secrets
 
 from fastapi.testclient import TestClient
 
-from psychology_roulette.api import create_app
+from psychology_roulette.api import EntryRateLimits, create_app
 from psychology_roulette.domain import Question
 from psychology_roulette.store import RoomStore
 
@@ -38,6 +38,78 @@ def _create_two_player_room(client: TestClient) -> tuple[str, dict, dict]:
     assert joined_response.headers["cache-control"] == "no-store"
     assert joined_response.json()["access_token"] == guest_token
     return code, created, joined_response.json()
+
+
+def test_private_invite_can_be_required_for_new_seats() -> None:
+    store = RoomStore(require_invite_token=True)
+    client = TestClient(create_app(store))
+    created = client.post(
+        "/api/rooms",
+        headers=_auth(_new_access_token()),
+        json={"host_name": "Host"},
+    ).json()
+    code = created["room"]["code"]
+    invite_token = created["invite_token"]
+    assert len(invite_token) == 43
+
+    missing = client.post(
+        f"/api/rooms/{code}/players",
+        headers=_auth(_new_access_token()),
+        json={"name": "Missing"},
+    )
+    assert missing.status_code == 409
+    invalid = client.post(
+        f"/api/rooms/{code}/players",
+        headers=_auth(_new_access_token()),
+        json={"name": "Invalid", "invite_token": _new_access_token()},
+    )
+    assert invalid.status_code == 409
+    joined = client.post(
+        f"/api/rooms/{code}/players",
+        headers=_auth(_new_access_token()),
+        json={"name": "Guest", "invite_token": invite_token},
+    )
+    assert joined.status_code == 201
+    assert joined.json()["player_name"] == "Guest"
+
+
+def test_create_and_join_entry_limits_return_retry_after() -> None:
+    limits = EntryRateLimits(
+        create_limit=1,
+        create_window_seconds=600,
+        join_limit=1,
+        join_window_seconds=600,
+    )
+    store = RoomStore()
+    client = TestClient(create_app(store, entry_rate_limits=limits))
+    created = client.post(
+        "/api/rooms",
+        headers=_auth(_new_access_token()),
+        json={"host_name": "Host"},
+    )
+    assert created.status_code == 201
+    blocked_create = client.post(
+        "/api/rooms",
+        headers=_auth(_new_access_token()),
+        json={"host_name": "Another Host"},
+    )
+    assert blocked_create.status_code == 429
+    assert int(blocked_create.headers["Retry-After"]) >= 1
+
+    code = created.json()["room"]["code"]
+    first_join = client.post(
+        f"/api/rooms/{code}/players",
+        headers=_auth(_new_access_token()),
+        json={"name": "Guest"},
+    )
+    assert first_join.status_code == 201
+    blocked_join = client.post(
+        f"/api/rooms/{code}/players",
+        headers=_auth(_new_access_token()),
+        json={"name": "Another Guest"},
+    )
+    assert blocked_join.status_code == 429
+    assert int(blocked_join.headers["Retry-After"]) >= 1
 
 
 def _assert_invalid_caller_token(response) -> None:
@@ -354,6 +426,7 @@ def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
             "Before the answers are revealed, predict where the room's average position will land."
         ),
         "target_player_name": None,
+        "source_player_name": None,
         "options": [-100, -67, -33, 0, 33, 67, 100],
         "submissions_count": 0,
         "required_submissions": 2,
@@ -391,8 +464,8 @@ def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
     revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token))
     assert revealed.status_code == 200
     assert revealed.json()["modifier"]["results"] == [
-        {"player_name": "Host", "value": 67, "score": 92},
-        {"player_name": "Guest", "value": -100, "score": 25},
+        {"player_name": "Host", "value": 67, "score": 92, "movement": None},
+        {"player_name": "Guest", "value": -100, "score": 25, "movement": None},
     ]
 
 
@@ -428,8 +501,8 @@ def test_secret_principle_api_reveals_selections_only_at_reveal() -> None:
 
     revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token))
     assert revealed.json()["modifier"]["results"] == [
-        {"player_name": "Host", "value": "fairness", "score": None},
-        {"player_name": "Guest", "value": "care", "score": None},
+        {"player_name": "Host", "value": "fairness", "score": None, "movement": None},
+        {"player_name": "Guest", "value": "care", "score": None, "movement": None},
     ]
 
 
@@ -457,6 +530,104 @@ def test_devils_advocate_api_is_hidden_until_the_reveal() -> None:
     assert modifier["submissions_count"] == 0
     assert modifier["options"] == []
     assert modifier["results"] == []
+
+
+def test_steelman_api_reveals_only_the_selected_players_finished_text() -> None:
+    client, code, host_token, guest_token = _client_at_second_round("steelman")
+    client.post(
+        f"/api/rooms/{code}/answers",
+        headers=_auth(host_token),
+        json={"position": -100, "confidence": 75},
+    )
+    answered = client.post(
+        f"/api/rooms/{code}/answers",
+        headers=_auth(guest_token),
+        json={"position": 100, "confidence": 65},
+    )
+    assert answered.json()["modifier"] is None
+
+    revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token)).json()
+    modifier = revealed["modifier"]
+    assert modifier["type"] == "steelman"
+    assert modifier["target_player_name"] in {"Host", "Guest"}
+    assert modifier["source_player_name"] in {"Host", "Guest"}
+    assert modifier["target_player_name"] != modifier["source_player_name"]
+    assert modifier["results"] is None
+
+    follow_up = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
+    assert follow_up["phase"] == "follow_up"
+    assert follow_up["modifier"]["required_submissions"] == 1
+    selected_token = host_token if modifier["target_player_name"] == "Host" else guest_token
+    other_token = guest_token if selected_token == host_token else host_token
+    rejected = client.post(
+        f"/api/rooms/{code}/modifier-submissions",
+        headers=_auth(other_token),
+        json={"value": "I should not be able to submit this."},
+    )
+    assert rejected.status_code == 409
+
+    submitted = client.post(
+        f"/api/rooms/{code}/modifier-submissions",
+        headers=_auth(selected_token),
+        json={"value": "Their view protects a real cost that deserves attention."},
+    ).json()
+    assert submitted["modifier"]["results"] is None
+    public_follow_up = client.get(f"/api/rooms/{code}", headers=_auth(other_token)).json()
+    assert public_follow_up["modifier"]["results"] is None
+
+    result = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
+    assert result["phase"] == "follow_up_reveal"
+    assert result["modifier"]["results"] == [
+        {
+            "player_name": modifier["target_player_name"],
+            "value": "Their view protects a real cost that deserves attention.",
+            "score": None,
+            "movement": None,
+        }
+    ]
+
+
+def test_change_my_mind_api_keeps_repoll_private_and_reveals_movement() -> None:
+    client, code, host_token, guest_token = _client_at_second_round("change_my_mind")
+    client.post(
+        f"/api/rooms/{code}/answers",
+        headers=_auth(host_token),
+        json={"position": -67, "confidence": 80},
+    )
+    client.post(
+        f"/api/rooms/{code}/answers",
+        headers=_auth(guest_token),
+        json={"position": 67, "confidence": 70},
+    )
+    revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token)).json()
+    assert revealed["modifier"]["type"] == "change_my_mind"
+    assert revealed["modifier"]["results"] is None
+
+    follow_up = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
+    assert follow_up["phase"] == "follow_up"
+    assert follow_up["modifier"]["required_submissions"] == 2
+    first = client.post(
+        f"/api/rooms/{code}/modifier-submissions",
+        headers=_auth(host_token),
+        json={"value": 0},
+    ).json()
+    assert first["modifier"]["results"] is None
+    assert first["modifier"]["submissions_count"] == 1
+    early_reveal = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token))
+    assert early_reveal.status_code == 409
+
+    second = client.post(
+        f"/api/rooms/{code}/modifier-submissions",
+        headers=_auth(guest_token),
+        json={"value": 67},
+    ).json()
+    assert second["modifier"]["results"] is None
+    result = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
+    assert result["phase"] == "follow_up_reveal"
+    assert result["modifier"]["results"] == [
+        {"player_name": "Host", "value": 0, "score": None, "movement": 67},
+        {"player_name": "Guest", "value": 67, "score": None, "movement": 0},
+    ]
 
 
 def test_default_six_round_api_session_reaches_completion() -> None:
@@ -505,6 +676,34 @@ def test_default_six_round_api_session_reaches_completion() -> None:
             modifier_rounds += int(room["modifier"]["timing"] == "post_reveal")
 
         room = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
+        if room["phase"] == "follow_up":
+            modifier = room["modifier"]
+            if modifier["type"] == "steelman":
+                selected_token = (
+                    host_token if modifier["target_player_name"] == "Host" else guest_token
+                )
+                room = client.post(
+                    f"/api/rooms/{code}/modifier-submissions",
+                    headers=_auth(selected_token),
+                    json={"value": "The other position protects a legitimate concern."},
+                ).json()
+            else:
+                client.post(
+                    f"/api/rooms/{code}/modifier-submissions",
+                    headers=_auth(host_token),
+                    json={"value": 33},
+                )
+                room = client.post(
+                    f"/api/rooms/{code}/modifier-submissions",
+                    headers=_auth(guest_token),
+                    json={"value": -33},
+                ).json()
+            assert room["modifier"]["results"] is None
+            room = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
+            assert room["phase"] == "follow_up_reveal"
+            room = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
 
     assert room["phase"] == "complete"
     assert modifier_rounds >= 1
+    assert room["session_summary"]["rounds_completed"] == 6
+    assert len(room["session_summary"]["players"]) == 2

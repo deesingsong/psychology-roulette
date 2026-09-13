@@ -258,6 +258,16 @@ input:focus {
 .landing-notice {
   margin-bottom: 16px;
 }
+.invite-notice {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(193, 255, 114, 0.28);
+  border-radius: 10px;
+  background: rgba(193, 255, 114, 0.07);
+  color: var(--acid);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
 footer {
   margin-top: 24px;
   color: #77717d;
@@ -270,9 +280,14 @@ footer {
 .game-header {
   display: flex;
   align-items: center;
+  gap: 8px;
   justify-content: space-between;
+  flex-wrap: wrap;
   padding-bottom: 22px;
   border-bottom: 1px solid var(--line);
+}
+.game-header .brand-row {
+  margin-right: auto;
 }
 .room-chip {
   padding: 10px 14px;
@@ -289,6 +304,10 @@ footer {
   color: var(--acid);
   font-size: 0.9rem;
   letter-spacing: 0.18em;
+}
+.invite-chip {
+  border-color: rgba(156, 124, 255, 0.35);
+  color: #c9bbff;
 }
 .stage {
   width: min(900px, 100%);
@@ -688,6 +707,49 @@ footer {
 .modifier-result-grid small {
   color: var(--acid);
 }
+.follow-up-stage > .button {
+  margin-top: 18px;
+}
+.steelman-field {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 22px;
+  text-align: left;
+}
+.steelman-field > span {
+  color: var(--violet);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+.steelman-field textarea {
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: #17151b;
+  color: var(--ink);
+  padding: 16px;
+  font: 500 1rem/1.55 "Manrope";
+}
+.steelman-field textarea:focus {
+  outline: 2px solid rgba(156, 124, 255, 0.45);
+  border-color: var(--violet);
+}
+.steelman-field small {
+  color: var(--muted);
+  text-align: right;
+}
+.steelman-card blockquote {
+  margin: 18px 0 0;
+  padding-left: 20px;
+  border-left: 3px solid var(--violet);
+  color: var(--ink);
+  font: 600 1.08rem/1.65 "Manrope";
+}
+.movement-grid span {
+  text-transform: none;
+}
 .discussion-card {
   margin: 16px 0;
   padding: 22px;
@@ -709,6 +771,110 @@ footer {
 }
 .complete-stage .lede {
   margin-inline: auto;
+}
+.final-stats {
+  margin: 34px 0;
+  text-align: left;
+}
+.round-history {
+  display: grid;
+  gap: 12px;
+  margin: 40px 0;
+  text-align: left;
+}
+.round-history h2 {
+  margin-bottom: 8px;
+}
+.round-history article {
+  position: relative;
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  gap: 12px;
+  overflow: hidden;
+  padding: 16px 18px 28px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+.round-history article > span {
+  color: var(--violet);
+  font-weight: 800;
+}
+.round-history article > div {
+  display: grid;
+  gap: 5px;
+}
+.round-history article small {
+  color: var(--muted);
+}
+.round-history article::after {
+  position: absolute;
+  right: 18px;
+  bottom: 13px;
+  left: 18px;
+  height: 2px;
+  content: "";
+  background: linear-gradient(90deg, var(--coral), var(--line), var(--acid));
+}
+.round-history article i {
+  position: absolute;
+  z-index: 1;
+  bottom: 9px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--violet);
+  transform: translateX(-50%);
+  box-shadow: 0 0 0 4px rgba(156, 124, 255, 0.17);
+}
+.player-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  text-align: left;
+}
+.player-summary-card {
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel);
+}
+.player-summary-card > span {
+  color: var(--acid);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.player-summary-card h2 {
+  margin: 9px 0;
+}
+.player-summary-card p,
+.player-summary-card > small {
+  color: var(--muted);
+}
+.player-summary-card > small {
+  display: block;
+  margin-top: 8px;
+}
+.player-summary-card dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 20px 0;
+}
+.player-summary-card dl div {
+  padding: 11px;
+  border-radius: 10px;
+  background: #17151b;
+}
+.player-summary-card dt {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+.player-summary-card dd {
+  margin: 4px 0 0;
+  font-weight: 800;
 }
 .floating-messages {
   position: fixed;
@@ -772,7 +938,8 @@ footer {
     grid-template-columns: 1fr;
   }
   .principle-grid,
-  .modifier-result-grid {
+  .modifier-result-grid,
+  .player-summary-grid {
     grid-template-columns: 1fr;
   }
   .reveal-axis {

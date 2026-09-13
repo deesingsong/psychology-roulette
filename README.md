@@ -13,15 +13,19 @@ Players privately take positions on thoughtful questions, predict one another, r
 - Start a six-round game from a curated question pack.
 - Submit a private position and confidence rating.
 - Encounter occasional, deterministically selected round modifiers.
-- Predict the room, name a secret principle, or defend the opposite position.
+- Predict the room, name a secret principle, defend another side, steelman a
+  counterpart, or privately answer again after discussion.
 - Reveal the room distribution after everyone answers.
 - Score room predictions without rewarding ideological agreement.
+- Show cross-round table analytics and playful, non-diagnostic player titles.
+- Share an optional 256-bit private invitation link.
+- Expire abandoned rooms and persistently throttle room entry attempts.
 - Advance through the complete session.
 - Deterministic, testable game rules independent of the UI.
 
-Room state is stored as versioned SQLite snapshots. Each participant receives an unguessable reconnect credential; only its hash is stored by the server, and game actions derive the acting player from that credential. The remaining modifier families, session analytics, and optional Qwen commentary come next.
+Room state is stored as versioned SQLite snapshots. Each participant receives an unguessable reconnect credential; only its hash is stored by the server, and game actions derive the acting player from that credential. Private invitation tokens are also stored only as hashes. AI-authored contextual wording and Oracle deployment are intentionally deferred until the deterministic product is settled.
 
-Room snapshots and actions require participant credentials. The create and four-letter join endpoints remain intentionally easy to access, so add rate limiting, room expiry, and either trusted-edge abuse controls or a higher-entropy invite secret before exposing the game directly to the public internet.
+Room snapshots and actions require participant credentials. Room create and join endpoints have SQLite-backed rate limits, and the production container adds edge throttling. Production mode requires the private invite URL by default; the four-letter-code-only flow remains available for local development.
 
 ## Architecture
 
@@ -74,6 +78,9 @@ The API documentation is available at `http://localhost:8000/docs`.
 
 By default, development rooms are stored in `backend/data/psychology-roulette.sqlite3`. Set `PSYCHOLOGY_ROULETTE_DB_PATH` to use a different database file.
 
+The local API accepts a four-letter code without the private invite token. Set
+`PSYCHOLOGY_ROULETTE_REQUIRE_INVITE_TOKEN=true` to exercise the production rule.
+
 ### Frontend
 
 ```powershell
@@ -93,3 +100,22 @@ uv run ruff check .
 ```
 
 See [docs/GAME_SPEC.md](docs/GAME_SPEC.md) for the current game rules and state-machine decisions.
+
+## Production container
+
+The checked-in Compose stack serves the web app and API from one origin, keeps the
+API off the public port, and stores SQLite data in a named volume:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up --build -d
+```
+
+Open `http://localhost:8080`, or change `PSYCHOLOGY_ROULETTE_PORT` in `.env`.
+The Compose defaults require private invite links and expire rooms after seven days
+without a mutation. Creation is limited to 10 attempts per 10 minutes per client;
+joining is limited to 30 attempts per minute, with an additional Nginx edge limit.
+
+Do not publish port 8000. The backend trusts forwarded client addresses only because
+Compose exposes it solely to the internal web proxy. TLS and the eventual Oracle
+host setup remain the final deployment step.

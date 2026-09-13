@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from psychology_roulette.api import create_app
-from psychology_roulette.domain import Question
+from psychology_roulette.domain import GameError, Question
 from psychology_roulette.store import RoomStore, UnknownAccessToken
 
 
@@ -31,6 +31,87 @@ def _configure_predict_room(room, _player_id: str) -> None:
         )
         for number in range(1, 7)
     ]
+
+
+def test_private_invite_is_hashed_and_can_be_required(tmp_path: Path) -> None:
+    database_path = tmp_path / "invites.sqlite3"
+    store = RoomStore(database_path, require_invite_token=True)
+    try:
+        room, _host, host_token, invite_token = store.create_room("Host")
+        retry = store.create_room("Host", host_token)
+        assert retry[0].code == room.code
+        assert retry[3] == invite_token
+
+        stored_hash = store._connection.execute(
+            "SELECT invite_hash FROM rooms WHERE code = ?", (room.code,)
+        ).fetchone()["invite_hash"]
+        assert stored_hash == hashlib.sha256(invite_token.encode()).digest()
+        assert invite_token.encode() != stored_hash
+
+        with pytest.raises(GameError, match="private invite link"):
+            store.join_room(room.code, "Guest")
+        with pytest.raises(GameError, match="invalid"):
+            store.join_room(
+                room.code,
+                "Guest",
+                invite_token=secrets.token_urlsafe(32),
+            )
+
+        joined, guest, _guest_token = store.join_room(
+            room.code,
+            "Guest",
+            invite_token=invite_token,
+        )
+        assert joined.code == room.code
+        assert guest.name == "Guest"
+    finally:
+        store.close()
+
+
+def test_expired_rooms_and_sessions_are_pruned(tmp_path: Path) -> None:
+    store = RoomStore(tmp_path / "expiry.sqlite3", room_ttl_seconds=60)
+    try:
+        room, _host, host_token, _invite_token = store.create_room("Host")
+        store._connection.execute(
+            "UPDATE rooms SET updated_at = '2000-01-01T00:00:00.000Z' WHERE code = ?",
+            (room.code,),
+        )
+
+        assert store.prune_expired_rooms() == 1
+        with pytest.raises(UnknownAccessToken):
+            store.resume(host_token)
+        assert store._connection.execute("SELECT COUNT(*) FROM player_sessions").fetchone()[0] == 0
+    finally:
+        store.close()
+
+
+def test_rate_limit_buckets_are_atomic_and_persisted(tmp_path: Path) -> None:
+    database_path = tmp_path / "rate-limits.sqlite3"
+    first_store = RoomStore(database_path)
+    try:
+        assert (
+            first_store.consume_rate_limit("create:client", limit=2, window_seconds=10, now=100)
+            is None
+        )
+        assert (
+            first_store.consume_rate_limit("create:client", limit=2, window_seconds=10, now=101)
+            is None
+        )
+    finally:
+        first_store.close()
+
+    second_store = RoomStore(database_path)
+    try:
+        assert (
+            second_store.consume_rate_limit("create:client", limit=2, window_seconds=10, now=102)
+            == 8
+        )
+        assert (
+            second_store.consume_rate_limit("create:client", limit=2, window_seconds=10, now=110)
+            is None
+        )
+    finally:
+        second_store.close()
 
 
 def test_room_and_private_modifier_state_survive_sqlite_restart(tmp_path: Path) -> None:
@@ -135,8 +216,8 @@ def test_room_and_private_modifier_state_survive_sqlite_restart(tmp_path: Path) 
         )
         assert revealed.status_code == 200
         assert revealed.json()["modifier"]["results"] == [
-            {"player_name": "Host", "value": 67, "score": 92},
-            {"player_name": "Guest", "value": -100, "score": 25},
+            {"player_name": "Host", "value": 67, "score": 92, "movement": None},
+            {"player_name": "Guest", "value": -100, "score": 25, "movement": None},
         ]
     finally:
         second_store.close()
@@ -159,7 +240,7 @@ def test_access_tokens_are_unique_hashed_and_never_embedded_in_room_state(
     database_path = tmp_path / "tokens.sqlite3"
     store = RoomStore(database_path)
     try:
-        room, host, host_token = store.create_room("Host")
+        room, host, host_token, _invite_token = store.create_room("Host")
         room, guest, guest_token = store.join_room(room.code, "Guest")
         code = room.code
         assert host_token != guest_token
@@ -200,7 +281,7 @@ def test_failed_mutation_rolls_back_room_snapshot_and_revision(tmp_path: Path) -
     database_path = tmp_path / "rollback.sqlite3"
     store = RoomStore(database_path)
     try:
-        room, host, access_token = store.create_room("Host")
+        room, host, access_token, _invite_token = store.create_room("Host")
         code = room.code
 
         def mutate_then_fail(room, _player_id: str) -> None:
@@ -238,7 +319,7 @@ def test_commit_failure_rolls_back_and_connection_recovers(
     database_path = tmp_path / "commit-failure.sqlite3"
     store = RoomStore(database_path)
     try:
-        room, _host, access_token = store.create_room("Host")
+        room, _host, access_token, _invite_token = store.create_room("Host")
         original_commit = store._commit
 
         def fail_commit() -> None:
@@ -263,7 +344,7 @@ def test_concurrent_store_instances_preserve_joins_and_answers(tmp_path: Path) -
     database_path = tmp_path / "concurrent.sqlite3"
     stores = [RoomStore(database_path) for _ in range(3)]
     try:
-        room, _host, host_token = stores[0].create_room("Host")
+        room, _host, host_token, _invite_token = stores[0].create_room("Host")
         code = room.code
         join_barrier = Barrier(2)
 

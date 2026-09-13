@@ -102,6 +102,7 @@ def _modifier_snapshot(modifier: Modifier | None) -> dict[str, Any] | None:
         "title": modifier.title,
         "instructions": modifier.instructions,
         "target_player_id": modifier.target_player_id,
+        "source_player_id": modifier.source_player_id,
         "options": list(modifier.options),
         "submissions": [
             {"player_id": submission.player_id, "value": submission.value}
@@ -112,6 +113,7 @@ def _modifier_snapshot(modifier: Modifier | None) -> dict[str, Any] | None:
                 "player_id": result.player_id,
                 "value": result.value,
                 "score": result.score,
+                "movement": result.movement,
             }
             for result in modifier.results.values()
         ],
@@ -131,6 +133,10 @@ def _modifier_from_snapshot(value: Any, field: str) -> Modifier | None:
     target_value = payload.get("target_player_id")
     target_player_id = (
         None if target_value is None else _string(target_value, f"{field}.target_player_id")
+    )
+    source_value = payload.get("source_player_id")
+    source_player_id = (
+        None if source_value is None else _string(source_value, f"{field}.source_player_id")
     )
     options = tuple(
         _submission_value(item, f"{field}.options[]")
@@ -165,6 +171,8 @@ def _modifier_from_snapshot(value: Any, field: str) -> Modifier | None:
             raise SnapshotError(f"{field} contains duplicate modifier results.")
         raw_score = result_payload.get("score")
         score = None if raw_score is None else _integer(raw_score, f"{field}.score")
+        raw_movement = result_payload.get("movement")
+        movement = None if raw_movement is None else _integer(raw_movement, f"{field}.movement")
         results[player_id] = ModifierResult(
             player_id=player_id,
             value=_submission_value(
@@ -172,6 +180,7 @@ def _modifier_from_snapshot(value: Any, field: str) -> Modifier | None:
                 f"{field}.results[{index}].value",
             ),
             score=score,
+            movement=movement,
         )
 
     return Modifier(
@@ -180,6 +189,7 @@ def _modifier_from_snapshot(value: Any, field: str) -> Modifier | None:
         title=_string(payload.get("title"), f"{field}.title"),
         instructions=_string(payload.get("instructions"), f"{field}.instructions"),
         target_player_id=target_player_id,
+        source_player_id=source_player_id,
         options=options,
         submissions=submissions,
         results=results,
@@ -322,6 +332,8 @@ def room_from_snapshot(value: Any) -> Room:
             continue
         if modifier.target_player_id is not None and modifier.target_player_id not in players:
             raise SnapshotError("A stored modifier target references an unknown player.")
+        if modifier.source_player_id is not None and modifier.source_player_id not in players:
+            raise SnapshotError("A stored modifier source references an unknown player.")
         if not set(modifier.submissions).issubset(player_ids):
             raise SnapshotError("A stored modifier submission references an unknown player.")
         if not set(modifier.results).issubset(player_ids):

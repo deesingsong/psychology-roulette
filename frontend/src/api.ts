@@ -96,18 +96,23 @@ function roomPath(code: string, suffix = "") {
 }
 
 export const api = {
-  createRoom(hostName: string, accessToken: string) {
+  createRoom(hostName: string, accessToken: string, inviteToken: string) {
     return request<RoomSessionView>("/api/rooms", {
       method: "POST",
       accessToken,
-      body: JSON.stringify({ host_name: hostName }),
+      body: JSON.stringify({ host_name: hostName, invite_token: inviteToken }),
     });
   },
-  joinRoom(code: string, name: string, accessToken: string) {
+  joinRoom(
+    code: string,
+    name: string,
+    accessToken: string,
+    inviteToken: string | null,
+  ) {
     return request<RoomSessionView>(roomPath(code, "/players"), {
       method: "POST",
       accessToken,
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, invite_token: inviteToken }),
     });
   },
   resume(accessToken: string, signal?: AbortSignal) {

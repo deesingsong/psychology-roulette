@@ -191,6 +191,94 @@ def test_devils_advocate_is_a_post_reveal_targeted_challenge() -> None:
     assert "middle" in current_round.modifier.instructions.lower()
 
 
+def test_steelman_selects_a_counterpart_and_keeps_the_draft_private() -> None:
+    room, host_id, guest_id = _room_at_modifier_round(ModifierType.STEELMAN)
+    current_round = room.current_round
+    assert current_round and current_round.modifier
+    modifier = current_round.modifier
+    assert modifier.timing is ModifierTiming.POST_REVEAL
+    assert modifier.target_player_id in {host_id, guest_id}
+
+    room.submit_answer(player_id=host_id, position=-100, confidence=75)
+    room.submit_answer(player_id=guest_id, position=100, confidence=65)
+    room.reveal(host_id=host_id)
+
+    assert room.phase is RoomPhase.REVEAL
+    assert modifier.source_player_id in {host_id, guest_id}
+    assert modifier.source_player_id != modifier.target_player_id
+    assert modifier.results == {}
+
+    room.advance(host_id=host_id)
+    assert room.phase is RoomPhase.FOLLOW_UP
+    selected_id = modifier.target_player_id
+    other_id = guest_id if selected_id == host_id else host_id
+    assert room.modifier_required_player_ids() == {selected_id}
+
+    with pytest.raises(GameError, match="selected player"):
+        room.submit_modifier(player_id=other_id, value="A fair account")
+    with pytest.raises(GameError, match="short steelman"):
+        room.submit_modifier(player_id=selected_id, value="   ")
+    with pytest.raises(GameError, match="280"):
+        room.submit_modifier(player_id=selected_id, value="x" * 281)
+    with pytest.raises(GameError, match="required player"):
+        room.advance(host_id=host_id)
+
+    room.submit_modifier(
+        player_id=selected_id,
+        value="  Their view protects a concern the room should take seriously.  ",
+    )
+    assert modifier.results == {}
+    room.advance(host_id=host_id)
+
+    assert room.phase is RoomPhase.FOLLOW_UP_REVEAL
+    assert modifier.results[selected_id].value == (
+        "Their view protects a concern the room should take seriously."
+    )
+    room.advance(host_id=host_id)
+    assert room.phase is RoomPhase.COMPLETE
+
+
+def test_change_my_mind_repolls_privately_and_records_movement() -> None:
+    room, host_id, guest_id = _room_at_modifier_round(ModifierType.CHANGE_MY_MIND)
+    current_round = room.current_round
+    assert current_round and current_round.modifier
+    modifier = current_round.modifier
+    assert modifier.options == (-100, -67, -33, 0, 33, 67, 100)
+
+    room.submit_answer(player_id=host_id, position=-67, confidence=80)
+    room.submit_answer(player_id=guest_id, position=67, confidence=70)
+    room.reveal(host_id=host_id)
+    room.advance(host_id=host_id)
+    assert room.phase is RoomPhase.FOLLOW_UP
+    assert room.modifier_required_player_ids() == {host_id, guest_id}
+
+    with pytest.raises(GameError, match="seven available"):
+        room.submit_modifier(player_id=host_id, value="0")
+    room.submit_modifier(player_id=host_id, value=0)
+    assert modifier.results == {}
+    with pytest.raises(GameError, match="required player"):
+        room.advance(host_id=host_id)
+    room.submit_modifier(player_id=guest_id, value=67)
+    room.advance(host_id=host_id)
+
+    assert room.phase is RoomPhase.FOLLOW_UP_REVEAL
+    assert modifier.results[host_id].movement == 67
+    assert modifier.results[guest_id].movement == 0
+    room.advance(host_id=host_id)
+    assert room.phase is RoomPhase.COMPLETE
+
+    summary = room.session_summary()
+    assert summary is not None
+    assert summary.rounds_completed == 2
+    assert summary.overall_average_position == 8.2
+    assert summary.overall_average_confidence == 65.0
+    assert summary.widest_round_number == 2
+    assert summary.total_position_changes == 1
+    host_summary = next(item for item in summary.players if item.player_id == host_id)
+    assert host_summary.movement_total == 67
+    assert host_summary.title == "Open Door"
+
+
 def test_default_modifier_seed_is_private_random_material(
     questions: list[Question],
 ) -> None:

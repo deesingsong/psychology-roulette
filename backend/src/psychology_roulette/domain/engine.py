@@ -15,9 +15,12 @@ from .models import (
     ModifierTiming,
     ModifierType,
     Player,
+    PlayerAnalytics,
     Question,
     RoomPhase,
     Round,
+    RoundAnalytics,
+    SessionAnalytics,
 )
 
 POSITION_VALUES = {-100, -67, -33, 0, 33, 67, 100}
@@ -27,7 +30,10 @@ SUPPORTED_MODIFIERS = (
     ModifierType.PREDICT_ROOM,
     ModifierType.SECRET_PRINCIPLE,
     ModifierType.DEVILS_ADVOCATE,
+    ModifierType.STEELMAN,
+    ModifierType.CHANGE_MY_MIND,
 )
+FOLLOW_UP_MODIFIERS = {ModifierType.STEELMAN, ModifierType.CHANGE_MY_MIND}
 
 
 class GameError(ValueError):
@@ -116,15 +122,19 @@ class Room:
         return answer
 
     def submit_modifier(self, *, player_id: str, value: int | str) -> ModifierSubmission:
-        if self.phase is not RoomPhase.MODIFIER:
+        if self.phase not in {RoomPhase.MODIFIER, RoomPhase.FOLLOW_UP}:
             raise GameError("Modifier submissions are not being accepted right now.")
         if player_id not in self.players:
             raise GameError("Player not found in this room.")
 
         current_round = self._require_round()
         modifier = current_round.modifier
-        if not modifier or modifier.timing is not ModifierTiming.PRE_REVEAL:
+        if not modifier:
             raise GameError("This round does not accept modifier submissions.")
+        if self.phase is RoomPhase.MODIFIER and modifier.timing is not ModifierTiming.PRE_REVEAL:
+            raise GameError("This round does not accept modifier submissions.")
+        if self.phase is RoomPhase.FOLLOW_UP and modifier.type not in FOLLOW_UP_MODIFIERS:
+            raise GameError("This round does not accept follow-up submissions.")
 
         if modifier.type is ModifierType.PREDICT_ROOM:
             if type(value) is not int or value not in POSITION_VALUES:
@@ -132,6 +142,19 @@ class Room:
         elif modifier.type is ModifierType.SECRET_PRINCIPLE:
             if type(value) is not str or value not in modifier.options:
                 raise GameError("Choose one of the question's listed principles.")
+        elif modifier.type is ModifierType.STEELMAN:
+            if player_id != modifier.target_player_id:
+                raise GameError("Only the selected player submits this steelman.")
+            if type(value) is not str:
+                raise GameError("Write a short steelman before submitting.")
+            value = " ".join(value.split())
+            if not value:
+                raise GameError("Write a short steelman before submitting.")
+            if len(value) > 280:
+                raise GameError("Keep the steelman to 280 characters or fewer.")
+        elif modifier.type is ModifierType.CHANGE_MY_MIND:
+            if type(value) is not int or value not in POSITION_VALUES:
+                raise GameError("Choose one of the seven available positions.")
         else:
             raise GameError("This modifier does not accept submissions.")
 
@@ -154,12 +177,32 @@ class Room:
             raise GameError("Every player must complete the modifier before the reveal.")
 
         self._calculate_modifier_results(current_round)
+        self._resolve_steelman_source(current_round)
         self.phase = RoomPhase.REVEAL
 
     def advance(self, *, host_id: str) -> None:
         self._require_host(host_id)
-        if self.phase is not RoomPhase.REVEAL:
-            raise GameError("Reveal the current round before advancing.")
+        current_round = self._require_round()
+        modifier = current_round.modifier
+        if self.phase is RoomPhase.REVEAL:
+            if modifier and modifier.type in FOLLOW_UP_MODIFIERS:
+                self.phase = RoomPhase.FOLLOW_UP
+                return
+            self._finish_round()
+            return
+        if self.phase is RoomPhase.FOLLOW_UP:
+            required = self.modifier_required_player_ids()
+            if not modifier or set(modifier.submissions) != required:
+                raise GameError("Every required player must complete the follow-up first.")
+            self._calculate_follow_up_results(current_round)
+            self.phase = RoomPhase.FOLLOW_UP_REVEAL
+            return
+        if self.phase is RoomPhase.FOLLOW_UP_REVEAL:
+            self._finish_round()
+            return
+        raise GameError("Reveal the current round before advancing.")
+
+    def _finish_round(self) -> None:
         if self.current_round_index + 1 >= len(self.rounds):
             self.phase = RoomPhase.COMPLETE
             return
@@ -168,7 +211,16 @@ class Room:
 
     def round_summary(self) -> dict[str, float | int] | None:
         current_round = self.current_round
-        if self.phase not in {RoomPhase.REVEAL, RoomPhase.COMPLETE} or not current_round:
+        if (
+            self.phase
+            not in {
+                RoomPhase.REVEAL,
+                RoomPhase.FOLLOW_UP,
+                RoomPhase.FOLLOW_UP_REVEAL,
+                RoomPhase.COMPLETE,
+            }
+            or not current_round
+        ):
             return None
         positions = [answer.position for answer in current_round.answers.values()]
         confidences = [answer.confidence for answer in current_round.answers.values()]
@@ -178,6 +230,139 @@ class Room:
             "range": max(positions) - min(positions),
             "answer_count": len(positions),
         }
+
+    def modifier_required_player_ids(self) -> set[str]:
+        current_round = self.current_round
+        modifier = current_round.modifier if current_round else None
+        if not modifier:
+            return set()
+        if modifier.timing is ModifierTiming.PRE_REVEAL:
+            return set(self.players)
+        if modifier.type is ModifierType.CHANGE_MY_MIND:
+            return set(self.players)
+        if modifier.type is ModifierType.STEELMAN and modifier.target_player_id:
+            return {modifier.target_player_id}
+        return set()
+
+    def session_summary(self) -> SessionAnalytics | None:
+        if self.phase is not RoomPhase.COMPLETE:
+            return None
+        completed_rounds = [
+            game_round for game_round in self.rounds if set(game_round.answers) == set(self.players)
+        ]
+        if not completed_rounds:
+            return None
+
+        round_analytics = tuple(
+            self._round_analytics(game_round) for game_round in completed_rounds
+        )
+        all_answers = [
+            answer for game_round in completed_rounds for answer in game_round.answers.values()
+        ]
+        widest_round = max(round_analytics, key=lambda item: item.position_range)
+        total_position_changes = sum(
+            1
+            for game_round in completed_rounds
+            if game_round.modifier and game_round.modifier.type is ModifierType.CHANGE_MY_MIND
+            for result in game_round.modifier.results.values()
+            if result.movement
+        )
+
+        player_analytics: list[PlayerAnalytics] = []
+        for player_id in self.players:
+            answers = [game_round.answers[player_id] for game_round in completed_rounds]
+            positions = [answer.position for answer in answers]
+            confidences = [answer.confidence for answer in answers]
+            room_distances = [
+                abs(
+                    game_round.answers[player_id].position
+                    - fmean(answer.position for answer in game_round.answers.values())
+                )
+                for game_round in completed_rounds
+            ]
+            prediction_scores = [
+                result.score
+                for game_round in completed_rounds
+                if game_round.modifier
+                and game_round.modifier.type is ModifierType.PREDICT_ROOM
+                and (result := game_round.modifier.results.get(player_id))
+                and result.score is not None
+            ]
+            movement_total = sum(
+                result.movement or 0
+                for game_round in completed_rounds
+                if game_round.modifier
+                and game_round.modifier.type is ModifierType.CHANGE_MY_MIND
+                and (result := game_round.modifier.results.get(player_id))
+            )
+            average_confidence = round(fmean(confidences), 1)
+            average_room_distance = round(fmean(room_distances), 1)
+            position_span = max(positions) - min(positions)
+            prediction_score = round(fmean(prediction_scores), 1) if prediction_scores else None
+            title, title_description = self._player_title(
+                prediction_score=prediction_score,
+                movement_total=movement_total,
+                position_span=position_span,
+                average_confidence=average_confidence,
+                average_room_distance=average_room_distance,
+            )
+            player_analytics.append(
+                PlayerAnalytics(
+                    player_id=player_id,
+                    title=title,
+                    title_description=title_description,
+                    rounds_answered=len(answers),
+                    average_position=round(fmean(positions), 1),
+                    average_confidence=average_confidence,
+                    average_room_distance=average_room_distance,
+                    position_span=position_span,
+                    prediction_score=prediction_score,
+                    movement_total=movement_total,
+                )
+            )
+
+        return SessionAnalytics(
+            rounds_completed=len(completed_rounds),
+            overall_average_position=round(fmean(answer.position for answer in all_answers), 1),
+            overall_average_confidence=round(fmean(answer.confidence for answer in all_answers), 1),
+            widest_round_number=widest_round.number,
+            total_position_changes=total_position_changes,
+            rounds=round_analytics,
+            players=tuple(player_analytics),
+        )
+
+    @staticmethod
+    def _round_analytics(game_round: Round) -> RoundAnalytics:
+        positions = [answer.position for answer in game_round.answers.values()]
+        confidences = [answer.confidence for answer in game_round.answers.values()]
+        return RoundAnalytics(
+            number=game_round.number,
+            prompt=game_round.question.prompt,
+            average_position=round(fmean(positions), 1),
+            average_confidence=round(fmean(confidences), 1),
+            position_range=max(positions) - min(positions),
+        )
+
+    @staticmethod
+    def _player_title(
+        *,
+        prediction_score: float | None,
+        movement_total: int,
+        position_span: int,
+        average_confidence: float,
+        average_room_distance: float,
+    ) -> tuple[str, str]:
+        if prediction_score is not None and prediction_score >= 80:
+            return "Room Reader", "Your private predictions tracked the table closely."
+        if movement_total:
+            return "Open Door", "At least one conversation moved your follow-up answer."
+        if position_span >= 134:
+            return "Wide Lens", "You used far-apart positions across the session."
+        if average_confidence >= 75:
+            return "Firm Footing", "You usually answered with high confidence."
+        if average_room_distance <= 25:
+            return "Common Ground", "Your answers often landed near the room average."
+        return "Thoughtful Constant", "You kept a measured rhythm across the table."
 
     def _require_host(self, player_id: str) -> Player:
         player = self.players.get(player_id)
@@ -240,8 +425,30 @@ class Room:
                 ),
                 options=game_round.question.values,
             )
+        if modifier_type is ModifierType.CHANGE_MY_MIND:
+            return Modifier(
+                type=modifier_type,
+                timing=ModifierTiming.POST_REVEAL,
+                title="Change My Mind",
+                instructions=(
+                    "After the discussion, privately choose your position again. "
+                    "The room will reveal what moved, without treating movement as winning."
+                ),
+                options=POSITION_OPTIONS,
+            )
 
-        target_player_id = self._select_devil_target(rng)
+        target_player_id = self._select_challenge_target(rng)
+        if modifier_type is ModifierType.STEELMAN:
+            return Modifier(
+                type=modifier_type,
+                timing=ModifierTiming.POST_REVEAL,
+                title="Steelman",
+                instructions=(
+                    "Restate the assigned person's position as strongly and fairly as you can, "
+                    "in language they could recognize."
+                ),
+                target_player_id=target_player_id,
+            )
         return Modifier(
             type=ModifierType.DEVILS_ADVOCATE,
             timing=ModifierTiming.POST_REVEAL,
@@ -253,7 +460,7 @@ class Room:
             target_player_id=target_player_id,
         )
 
-    def _select_devil_target(self, rng: random.Random) -> str:
+    def _select_challenge_target(self, rng: random.Random) -> str:
         target_counts = dict.fromkeys(self.players, 0)
         for game_round in self.rounds:
             modifier = game_round.modifier
@@ -285,6 +492,26 @@ class Room:
         return random.Random(int.from_bytes(digest))
 
     @staticmethod
+    def _resolve_steelman_source(game_round: Round) -> None:
+        modifier = game_round.modifier
+        if (
+            not modifier
+            or modifier.type is not ModifierType.STEELMAN
+            or not modifier.target_player_id
+        ):
+            return
+        target_answer = game_round.answers[modifier.target_player_id]
+        candidates = [
+            player_id for player_id in game_round.answers if player_id != modifier.target_player_id
+        ]
+        modifier.source_player_id = max(
+            candidates,
+            key=lambda player_id: abs(
+                game_round.answers[player_id].position - target_answer.position
+            ),
+        )
+
+    @staticmethod
     def _calculate_modifier_results(game_round: Round) -> None:
         modifier = game_round.modifier
         if not modifier:
@@ -308,4 +535,25 @@ class Room:
                     value=submission.value,
                 )
                 for player_id, submission in modifier.submissions.items()
+            }
+
+    @staticmethod
+    def _calculate_follow_up_results(game_round: Round) -> None:
+        modifier = game_round.modifier
+        if not modifier:
+            return
+        if modifier.type is ModifierType.STEELMAN:
+            modifier.results = {
+                player_id: ModifierResult(player_id=player_id, value=submission.value)
+                for player_id, submission in modifier.submissions.items()
+            }
+        elif modifier.type is ModifierType.CHANGE_MY_MIND:
+            modifier.results = {
+                player_id: ModifierResult(
+                    player_id=player_id,
+                    value=submission.value,
+                    movement=abs(submission.value - game_round.answers[player_id].position),
+                )
+                for player_id, submission in modifier.submissions.items()
+                if type(submission.value) is int
             }

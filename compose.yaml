@@ -1,0 +1,28 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      PSYCHOLOGY_ROULETTE_DB_PATH: /data/psychology-roulette.sqlite3
+      PSYCHOLOGY_ROULETTE_REQUIRE_INVITE_TOKEN: ${PSYCHOLOGY_ROULETTE_REQUIRE_INVITE_TOKEN:-true}
+      PSYCHOLOGY_ROULETTE_ROOM_TTL_SECONDS: ${PSYCHOLOGY_ROULETTE_ROOM_TTL_SECONDS:-604800}
+      PSYCHOLOGY_ROULETTE_CREATE_LIMIT: ${PSYCHOLOGY_ROULETTE_CREATE_LIMIT:-10}
+      PSYCHOLOGY_ROULETTE_CREATE_WINDOW_SECONDS: ${PSYCHOLOGY_ROULETTE_CREATE_WINDOW_SECONDS:-600}
+      PSYCHOLOGY_ROULETTE_JOIN_LIMIT: ${PSYCHOLOGY_ROULETTE_JOIN_LIMIT:-30}
+      PSYCHOLOGY_ROULETTE_JOIN_WINDOW_SECONDS: ${PSYCHOLOGY_ROULETTE_JOIN_WINDOW_SECONDS:-60}
+    volumes:
+      - roulette_data:/data
+
+  web:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${PSYCHOLOGY_ROULETTE_PORT:-8080}:8080"
+
+volumes:
+  roulette_data:

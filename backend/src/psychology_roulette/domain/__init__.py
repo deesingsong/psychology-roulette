@@ -7,9 +7,12 @@ from .models import (
     ModifierTiming,
     ModifierType,
     Player,
+    PlayerAnalytics,
     Question,
     RoomPhase,
     Round,
+    RoundAnalytics,
+    SessionAnalytics,
 )
 
 __all__ = [
@@ -21,8 +24,11 @@ __all__ = [
     "ModifierTiming",
     "ModifierType",
     "Player",
+    "PlayerAnalytics",
     "Question",
     "Room",
     "RoomPhase",
     "Round",
+    "RoundAnalytics",
+    "SessionAnalytics",
 ]

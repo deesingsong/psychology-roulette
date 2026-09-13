@@ -10,7 +10,7 @@ Psychology Roulette is not a personality test and does not infer diagnoses or fi
 
 - 3–8 players is the intended social range; two players are allowed during development.
 - A standard session contains six rounds and should last roughly 20–35 minutes.
-- Players join using a four-letter room code and a display name.
+- Players join using a four-letter room code and a display name. Hosts can also share a private link containing a 256-bit invite token.
 - Each seat receives a private reconnect credential that survives a browser refresh.
 - The host controls starting and advancing the session.
 - No account is required.
@@ -32,11 +32,13 @@ LOBBY
   -> ANSWERING
   -> MODIFIER (when a pre-reveal modifier is selected)
   -> REVEAL
+  -> FOLLOW_UP (for Steelman or Change My Mind)
+  -> FOLLOW_UP_REVEAL
   -> ANSWERING (next round)
   -> COMPLETE
 ```
 
-Answers are private while the room is in `ANSWERING`. An authenticated room snapshot exposes only whether each player has submitted. Positions become visible in `REVEAL`.
+Answers are private while the room is in `ANSWERING`. An authenticated room snapshot exposes only whether each player has submitted. Positions become visible in `REVEAL`. Steelman text and second positions remain private during `FOLLOW_UP`, and appear only in `FOLLOW_UP_REVEAL`.
 
 The selected modifier remains hidden while players choose their positions. A pre-reveal modifier becomes visible only after every position is locked. Modifier submissions remain private until the reveal.
 
@@ -44,7 +46,7 @@ The selected modifier remains hidden while players choose their positions. A pre
 
 The opening round is always plain so players can learn the basic loop. Each later eligible round has a stable 65% chance of receiving a modifier. The schedule is derived from a server-secret per-room seed, so it remains stable during play without being predictable from the public room code. If every draw misses, the final eligible round receives one, ensuring a normal multi-round session demonstrates the feature. Setting the modifier chance to zero explicitly disables this fallback.
 
-The engine selects only from modifier templates allowed by the current question. Target selection and scoring remain deterministic server responsibilities. Tests can inject a fixed seed for exact reproducibility, but production seeds are never serialized. Devil's Advocate targets are drawn from the least-targeted players and avoid an immediate repeat whenever another equally fair player is available.
+The engine selects only from modifier templates allowed by the current question. Target selection and scoring remain deterministic server responsibilities. Tests can inject a fixed seed for exact reproducibility, but production seeds are never serialized. Targeted challenges are drawn from the least-targeted players and avoid an immediate repeat whenever another equally fair player is available. After a Steelman round is answered, the server assigns the selected writer the other player whose recorded position is furthest from theirs.
 
 AI may eventually generate contextual wording inside a selected template. It may not invent authoritative scoring rules, select ineligible players, or block the round. Invalid or late AI output falls back to curated copy.
 
@@ -53,10 +55,10 @@ Initial modifier families:
 1. **Predict the Room** — every player predicts the group average before answers appear.
 2. **Secret Principle** — every player privately selects the value that mattered most to their answer.
 3. **Devil's Advocate** — one eligible player is challenged after the reveal to defend a meaningfully different position; a player who chose the middle may defend either clear side.
-4. **Steelman** — planned.
-5. **Change My Mind** — planned.
+4. **Steelman** — after discussion, one fairly selected player writes a concise good-faith restatement of the most distant submitted position. Only that player may submit, and the text stays private until the host reveals it.
+5. **Change My Mind** — after discussion, every player privately chooses from the same seven-position scale again. The follow-up reveal shows the original and new position plus absolute movement.
 
-The first three are implemented with curated instructions. AI-authored contextual wording is a later enhancement and will use the same validated modifier structure.
+All five are implemented with curated instructions. AI-authored contextual wording is a later enhancement and will use the same validated modifier structure.
 
 ## Scoring
 
@@ -66,7 +68,11 @@ Agreement with the room is never itself rewarded. Predict the Room awards up to 
 score = max(0, round(100 - abs(prediction - room_average) / 2))
 ```
 
-This measures how accurately someone read the group, not whether their personal answer matched it. Future scoring can reward fair representation of another position or correctly identifying anonymous reasoning.
+This measures how accurately someone read the group, not whether their personal answer matched it. Change My Mind reports movement but does not award points for changing or holding. Steelman text is not automatically scored.
+
+## Session summary
+
+Once the final round is complete, the server derives a session summary from the stored rounds. It includes table averages, the widest round, each player's average position and confidence, average distance from the room, position span, prediction performance, and total follow-up movement. Titles such as "Room Reader" or "Open Door" are playful descriptions of this session only; they are not personality claims or diagnoses.
 
 ## Content
 
@@ -84,4 +90,8 @@ During an active round, the client does not allow a participant to discard the o
 
 ## Deployment boundary
 
-Participant credentials prevent room snapshots and actions from being read or changed with a room code alone. Room creation remains open, and the public join endpoint still accepts the intentionally short four-letter invitation code plus a self-issued participant credential. Before public internet deployment, rate-limit both operations at the trusted edge, expire or archive abandoned rooms, and consider a higher-entropy invite secret to prevent code enumeration, room-filling abuse, unbounded storage growth, and exhaustion of the short-code namespace.
+Participant credentials prevent room snapshots and actions from being read or changed with a room code alone. Room creation and joining consume persistent fixed-window rate-limit buckets keyed by a hash of the network client address. Abandoned rooms and their participant sessions are deleted after a configurable inactivity period.
+
+Every new room has a 256-bit private invite token whose SHA-256 digest is stored with the room. A deployment can require it for every new seat; the production Compose configuration does so by default. The host browser retains the token and copies a URL containing it. Manual code-only joins remain enabled by default in local development.
+
+The container edge applies an additional create/join throttle, overwrites untrusted forwarded-address headers, serves the client and API from one origin, and adds browser security headers. The API container is internal-only. TLS termination, backups, monitoring, and machine-specific Oracle configuration remain deployment responsibilities.
