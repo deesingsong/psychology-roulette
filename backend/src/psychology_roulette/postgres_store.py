@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 import math
 import secrets
 import time
@@ -38,14 +37,12 @@ class PostgresRoomStore:
         database_url: str,
         *,
         room_ttl_seconds: int | None,
-        require_invite_token: bool = False,
     ) -> None:
         if not database_url:
             raise ValueError("database_url is required.")
         if room_ttl_seconds is not None and room_ttl_seconds < 1:
             raise ValueError("room_ttl_seconds must be positive or None.")
         self.room_ttl_seconds = room_ttl_seconds
-        self.require_invite_token = require_invite_token
         # Supabase's transaction pooler is intended for temporary/serverless clients.
         # One connection per warm function instance prevents a connection fan-out.
         self._pool = ConnectionPool(
@@ -129,32 +126,6 @@ class PostgresRoomStore:
         if session is None:
             raise UnknownAccessToken("A valid room access token is required.")
         return session
-
-    @staticmethod
-    def _stored_invite_hash(connection, code: str) -> bytes | None:
-        row = connection.execute(
-            "SELECT invite_hash FROM rooms WHERE code = %s",
-            (code,),
-        ).fetchone()
-        if row is None:
-            raise GameError("Room not found.")
-        value = row["invite_hash"]
-        return bytes(value) if value is not None else None
-
-    def _require_room_invite(
-        self,
-        connection,
-        code: str,
-        invite_token: str | None,
-    ) -> None:
-        if invite_token is None:
-            if self.require_invite_token:
-                raise GameError("Use the room's private invite link to join.")
-            return
-        presented_hash = RoomStore._invite_hash(invite_token)
-        stored_hash = self._stored_invite_hash(connection, code)
-        if stored_hash is None or not hmac.compare_digest(stored_hash, presented_hash):
-            raise GameError("That private invite link is invalid.")
 
     @classmethod
     def _idempotent_session(
@@ -257,16 +228,9 @@ class PostgresRoomStore:
         self,
         host_name: str,
         access_token: str | None = None,
-        invite_token: str | None = None,
-    ) -> tuple[Room, Player, str, str]:
+    ) -> tuple[Room, Player, str]:
         active_token = access_token if access_token is not None else RoomStore._new_access_token()
-        active_invite = (
-            invite_token
-            if invite_token is not None
-            else RoomStore._invite_from_access_token(active_token)
-        )
         token_hash = RoomStore._token_hash(active_token)
-        invite_hash = RoomStore._invite_hash(active_invite)
         normalized_name = RoomStore._normalized_name(host_name)
         self.prune_expired_rooms()
 
@@ -284,12 +248,7 @@ class PostgresRoomStore:
             )
             if existing is not None:
                 room, host = existing
-                stored_hash = self._stored_invite_hash(connection, room.code)
-                if stored_hash is None or not hmac.compare_digest(stored_hash, invite_hash):
-                    raise AccessTokenConflict(
-                        "That access token is already assigned to a different invitation."
-                    )
-                return room, host, active_token, active_invite
+                return room, host, active_token
 
             for _ in range(50):
                 code = "".join(secrets.choice(ROOM_ALPHABET) for _ in range(4))
@@ -301,17 +260,17 @@ class PostgresRoomStore:
                 host = room.add_player(host_name, is_host=True)
                 inserted = connection.execute(
                     """
-                    INSERT INTO rooms (code, state_json, format_version, invite_hash)
-                    VALUES (%s, %s::jsonb, %s, %s)
+                    INSERT INTO rooms (code, state_json, format_version)
+                    VALUES (%s, %s::jsonb, %s)
                     ON CONFLICT (code) DO NOTHING
                     RETURNING code
                     """,
-                    (code, room_to_json(room), SNAPSHOT_FORMAT_VERSION, invite_hash),
+                    (code, room_to_json(room), SNAPSHOT_FORMAT_VERSION),
                 ).fetchone()
                 if inserted is None:
                     continue
                 self._insert_session(connection, code, host.id, token_hash)
-                return room, host, active_token, active_invite
+                return room, host, active_token
             raise RuntimeError("Could not allocate a unique room code.")
 
     def join_room(
@@ -319,7 +278,6 @@ class PostgresRoomStore:
         code: str,
         name: str,
         access_token: str | None = None,
-        invite_token: str | None = None,
     ) -> tuple[Room, Player, str]:
         normalized = RoomStore._normalize_code(code)
         active_token = access_token if access_token is not None else RoomStore._new_access_token()
@@ -344,11 +302,29 @@ class PostgresRoomStore:
                 return room, player, active_token
 
             room = self._load_room(connection, normalized, for_update=True)
-            self._require_room_invite(connection, normalized, invite_token)
             player = room.add_player(name)
             self._save_room(connection, room)
             self._insert_session(connection, room.code, player.id, token_hash)
             return room, player, active_token
+
+    def end_room(self, code: str, access_token: str) -> None:
+        normalized = RoomStore._normalize_code(code)
+        token_hash = RoomStore._token_hash(access_token)
+        self.prune_expired_rooms()
+        with self._pool.connection() as connection, connection.transaction():
+            room_code, player_id = self._resolve_session(connection, token_hash)
+            if room_code != normalized:
+                raise RoomAccessDenied("This access token does not belong to that room.")
+            room = self._load_room(connection, normalized, for_update=True)
+            player = RoomStore._player_from_room(room, player_id)
+            if not player.is_host:
+                raise GameError("Only the host can end the game.")
+            cursor = connection.execute(
+                "DELETE FROM rooms WHERE code = %s",
+                (normalized,),
+            )
+            if cursor.rowcount != 1:
+                raise StoredRoomError(f"Room {normalized} disappeared while ending.")
 
     def get(self, code: str) -> Room:
         normalized = RoomStore._normalize_code(code)

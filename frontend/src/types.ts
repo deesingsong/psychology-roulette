@@ -101,7 +101,6 @@ export interface RoomView {
 
 export interface RoomSessionView {
   access_token: string;
-  invite_token?: string;
   player_id: string;
   player_name: string;
   is_host: boolean;
@@ -121,5 +120,4 @@ export interface Session {
   playerName: string;
   isHost: boolean;
   accessToken: string;
-  inviteToken: string | null;
 }

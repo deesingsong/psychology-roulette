@@ -18,14 +18,15 @@ Players privately take positions on thoughtful questions, predict one another, r
 - Reveal the room distribution after everyone answers.
 - Score room predictions without rewarding ideological agreement.
 - Show cross-round table analytics and playful, non-diagnostic player titles.
-- Share an optional 256-bit private invitation link.
 - Expire abandoned rooms and persistently throttle room entry attempts.
+- Let the host end an active game for the whole table at any time.
 - Advance through the complete session.
+- Return everyone home after completion without retaining stale seats.
 - Deterministic, testable game rules independent of the UI.
 
-Room state is stored as versioned snapshots: SQLite for local development and Postgres for hosted deployments. Each participant receives an unguessable reconnect credential; only its hash is stored by the server, and game actions derive the acting player from that credential. Private invitation tokens are also stored only as hashes. AI-authored contextual wording and Oracle deployment are intentionally deferred until the deterministic product is settled.
+Room state is stored as versioned snapshots: SQLite for local development and Postgres for hosted deployments. Each participant receives an unguessable reconnect credential; only its hash is stored by the server, and game actions derive the acting player from that credential. AI-authored contextual wording and Oracle deployment are intentionally deferred until the deterministic product is settled.
 
-Room snapshots and actions require participant credentials. Room create and join endpoints have database-backed rate limits, and the production container adds edge throttling. Production mode requires the private invite URL by default; the four-letter-code-only flow remains available for local development.
+Room snapshots and actions require participant credentials. New players join with the four-letter room code and a display name. Room create and join endpoints have database-backed rate limits, and the production container adds edge throttling.
 
 ## Architecture
 
@@ -80,9 +81,6 @@ The API documentation is available at `http://localhost:8000/docs`.
 
 By default, development rooms are stored in `backend/data/psychology-roulette.sqlite3`. Set `PSYCHOLOGY_ROULETTE_DB_PATH` to use a different database file.
 
-The local API accepts a four-letter code without the private invite token. Set
-`PSYCHOLOGY_ROULETTE_REQUIRE_INVITE_TOKEN=true` to exercise the production rule.
-
 ### Frontend
 
 ```powershell
@@ -112,6 +110,8 @@ Supabase Postgres data. `vercel.json` contains the service routing, and
 
 1. Create a Supabase project and run
    `supabase/migrations/20260913000000_create_game_store.sql` in its SQL editor.
+   If the project was created from an earlier version of that migration, also run
+   `supabase/migrations/20260914000000_remove_private_invites.sql`.
 2. Copy the transaction-pooler connection string from **Connect** in Supabase.
    Append `?sslmode=require` if the copied URL does not already specify SSL.
 3. Import this GitHub repository into Vercel and choose **Services** as the
@@ -120,7 +120,6 @@ Supabase Postgres data. `vercel.json` contains the service routing, and
 
    ```text
    PSYCHOLOGY_ROULETTE_DATABASE_URL=<Supabase transaction-pooler URL>
-   PSYCHOLOGY_ROULETTE_REQUIRE_INVITE_TOKEN=true
    PSYCHOLOGY_ROULETTE_ROOM_TTL_SECONDS=604800
    ```
 
@@ -154,8 +153,8 @@ docker compose up --build -d
 ```
 
 Open `http://localhost:8080`, or change `PSYCHOLOGY_ROULETTE_PORT` in `.env`.
-The Compose defaults require private invite links and expire rooms after seven days
-without a mutation. Creation is limited to 10 attempts per 10 minutes per client;
+Rooms expire after seven days without a mutation. Creation is limited to 10
+attempts per 10 minutes per client;
 joining is limited to 30 attempts per minute, with an additional Nginx edge limit.
 
 Do not publish port 8000. The backend trusts forwarded client addresses only because

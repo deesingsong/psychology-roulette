@@ -27,13 +27,11 @@ interface StoredSession {
   version: typeof SESSION_STORAGE_VERSION;
   roomCode: string;
   accessToken: string;
-  inviteToken: string | null;
 }
 
 interface PendingEntryAttempt {
   fingerprint: string;
   accessToken: string;
-  inviteToken: string | null;
 }
 
 interface ActiveAction {
@@ -78,10 +76,6 @@ function readStoredSession(): StoredSession | null {
         version: SESSION_STORAGE_VERSION,
         roomCode: parsed.roomCode,
         accessToken: parsed.accessToken,
-        inviteToken:
-          "inviteToken" in parsed && typeof parsed.inviteToken === "string"
-            ? parsed.inviteToken
-            : null,
       };
     }
 
@@ -116,20 +110,6 @@ function isAbortError(reason: unknown) {
 
 function errorMessage(reason: unknown, fallback: string) {
   return reason instanceof Error ? reason.message : fallback;
-}
-
-function invitationFromUrl() {
-  const parameters = new URLSearchParams(window.location.search);
-  const roomCode = (parameters.get("room") ?? "").trim().toUpperCase();
-  const inviteToken = parameters.get("invite");
-  if (
-    !/^[A-Z]{4}$/.test(roomCode) ||
-    !inviteToken ||
-    inviteToken.length !== 43
-  ) {
-    return null;
-  }
-  return { roomCode, inviteToken };
 }
 
 async function copyText(value: string) {
@@ -181,7 +161,6 @@ function App() {
         version: SESSION_STORAGE_VERSION,
         roomCode: nextSession.roomCode,
         accessToken: nextSession.accessToken,
-        inviteToken: nextSession.inviteToken,
       } satisfies StoredSession;
       const wasSaved = writeStoredSession(stored);
       setStoredSession(stored);
@@ -247,7 +226,6 @@ function App() {
           playerName: restored.player_name,
           isHost: restored.is_host,
           accessToken: storedSession.accessToken,
-          inviteToken: storedSession.inviteToken,
         };
         setSession(nextSession);
         setRoom(restored.room);
@@ -270,7 +248,7 @@ function App() {
         ) {
           cancelled = true;
           clearSession(
-            "That saved seat is no longer available. Join the room again.",
+            "That game has ended or your saved seat is no longer available.",
           );
           return;
         }
@@ -322,6 +300,13 @@ function App() {
       pollControllerRef.current?.abort();
     };
   }, [clearSession, storedSession]);
+
+  useEffect(() => {
+    if (room?.phase === "complete") {
+      // Keep the final table on screen, but a reload now starts from home.
+      removeStoredSession();
+    }
+  }, [room?.phase]);
 
   const beginAction = useCallback((accessToken: string) => {
     if (activeTokenRef.current !== accessToken) return null;
@@ -401,10 +386,10 @@ function App() {
     [clearSession],
   );
 
-  const forgetSession = useCallback(() => {
+  const leaveSession = useCallback(() => {
     if (
       window.confirm(
-        "Forget this saved seat? This cannot be undone, and the seat will remain in the room.",
+        "Leave this room? You will not be able to reclaim this seat.",
       )
     ) {
       clearSession();
@@ -447,7 +432,8 @@ function App() {
       onClearActionError={() => setActionError(null)}
       onActionStart={beginAction}
       onActionEnd={finishAction}
-      onLeave={forgetSession}
+      onReturnHome={(notice) => clearSession(notice ?? null)}
+      onLeave={leaveSession}
     />
   );
 }
@@ -458,12 +444,9 @@ interface LandingProps {
 }
 
 function Landing({ notice, onSession }: LandingProps) {
-  const invitation = useMemo(() => invitationFromUrl(), []);
-  const [mode, setMode] = useState<"home" | "create" | "join">(
-    invitation ? "join" : "home",
-  );
+  const [mode, setMode] = useState<"home" | "create" | "join">("home");
   const [name, setName] = useState("");
-  const [code, setCode] = useState(invitation?.roomCode ?? "");
+  const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const pendingAttemptRef = useRef<PendingEntryAttempt | null>(null);
@@ -478,7 +461,6 @@ function Landing({ notice, onSession }: LandingProps) {
       mode,
       mode === "join" ? normalizedCode : null,
       normalizedName,
-      mode === "join" ? invitation?.inviteToken : null,
     ]);
     const pendingAttempt =
       pendingAttemptRef.current?.fingerprint === fingerprint
@@ -486,43 +468,23 @@ function Landing({ notice, onSession }: LandingProps) {
         : {
             fingerprint,
             accessToken: createAccessToken(),
-            inviteToken:
-              mode === "create"
-                ? createAccessToken()
-                : (invitation?.inviteToken ?? null),
           };
     pendingAttemptRef.current = pendingAttempt;
 
     try {
       const result =
         mode === "create"
-          ? await api.createRoom(
-              normalizedName,
-              pendingAttempt.accessToken,
-              pendingAttempt.inviteToken ?? createAccessToken(),
-            )
+          ? await api.createRoom(normalizedName, pendingAttempt.accessToken)
           : await api.joinRoom(
               normalizedCode,
               normalizedName,
               pendingAttempt.accessToken,
-              pendingAttempt.inviteToken,
             );
       if (result.access_token !== pendingAttempt.accessToken) {
         throw new ApiError(
           "The server returned a different reconnect key.",
           502,
           "access_token_mismatch",
-        );
-      }
-      if (
-        mode === "create" &&
-        (!result.invite_token ||
-          result.invite_token !== pendingAttempt.inviteToken)
-      ) {
-        throw new ApiError(
-          "The server returned a different private invitation.",
-          502,
-          "invite_token_mismatch",
         );
       }
       pendingAttemptRef.current = null;
@@ -534,10 +496,6 @@ function Landing({ notice, onSession }: LandingProps) {
           playerName: result.player_name,
           isHost: result.is_host,
           accessToken: result.access_token,
-          inviteToken:
-            mode === "create"
-              ? (result.invite_token ?? null)
-              : pendingAttempt.inviteToken,
         },
         result.room,
       );
@@ -581,7 +539,7 @@ function Landing({ notice, onSession }: LandingProps) {
           >
             <span className="choice-number">01</span>
             <strong>Create a room</strong>
-            <span>Host a new table and invite your friends.</span>
+            <span>Host a new table and share its room code.</span>
           </button>
           <button
             className="choice-card violet"
@@ -608,25 +566,20 @@ function Landing({ notice, onSession }: LandingProps) {
             {mode === "create" ? "What should we call you?" : "Enter the room"}
           </h2>
           {mode === "join" && (
-            <>
-              {invitation && (
-                <p className="invite-notice">Private invite link verified.</p>
-              )}
-              <label>
-                Room code
-                <input
-                  className="code-input"
-                  value={code}
-                  onChange={(event) =>
-                    setCode(event.target.value.slice(0, 4).toUpperCase())
-                  }
-                  placeholder="KJDM"
-                  minLength={4}
-                  maxLength={4}
-                  required
-                />
-              </label>
-            </>
+            <label>
+              Room code
+              <input
+                className="code-input"
+                value={code}
+                onChange={(event) =>
+                  setCode(event.target.value.slice(0, 4).toUpperCase())
+                }
+                placeholder="KJDM"
+                minLength={4}
+                maxLength={4}
+                required
+              />
+            </label>
           )}
           <label>
             Display name
@@ -673,6 +626,7 @@ interface GameProps {
   onClearActionError: () => void;
   onActionStart: (accessToken: string) => number | null;
   onActionEnd: (accessToken: string, generation: number) => void;
+  onReturnHome: (notice?: string) => void;
   onLeave: () => void;
 }
 
@@ -686,21 +640,11 @@ function Game({
   onClearActionError,
   onActionStart,
   onActionEnd,
+  onReturnHome,
   onLeave,
 }: GameProps) {
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
-
-  const copyInviteLink = () => {
-    if (!session.inviteToken) return;
-    const inviteUrl = new URL(window.location.href);
-    inviteUrl.search = new URLSearchParams({
-      room: room.code,
-      invite: session.inviteToken,
-    }).toString();
-    inviteUrl.hash = "";
-    void copyText(inviteUrl.toString());
-  };
 
   const act = async (request: () => Promise<RoomView>) => {
     if (pendingRef.current) return;
@@ -725,6 +669,39 @@ function Game({
     }
   };
 
+  const endGame = async () => {
+    if (
+      pendingRef.current ||
+      !window.confirm("End this game for everyone and return to the home screen?")
+    ) {
+      return;
+    }
+    pendingRef.current = true;
+    setPending(true);
+    onClearActionError();
+    const accessToken = session.accessToken;
+    const generation = onActionStart(accessToken);
+    if (generation === null) {
+      pendingRef.current = false;
+      setPending(false);
+      return;
+    }
+    let ended = false;
+    try {
+      await api.endRoom(room.code, accessToken);
+      ended = true;
+    } catch (reason) {
+      onActionError(reason, accessToken, generation);
+    } finally {
+      onActionEnd(accessToken, generation);
+      pendingRef.current = false;
+      setPending(false);
+    }
+    if (ended) {
+      onReturnHome("The game ended.");
+    }
+  };
+
   return (
     <main className="game-shell shell">
       <header className="game-header">
@@ -735,9 +712,13 @@ function Game({
         <button className="room-chip" onClick={() => void copyText(room.code)}>
           ROOM <strong>{room.code}</strong>
         </button>
-        {session.isHost && session.inviteToken && (
-          <button className="room-chip invite-chip" onClick={copyInviteLink}>
-            COPY PRIVATE INVITE
+        {session.isHost && room.phase !== "complete" && (
+          <button
+            className="room-chip end-game-chip"
+            disabled={pending}
+            onClick={() => void endGame()}
+          >
+            END GAME
           </button>
         )}
       </header>
@@ -832,15 +813,17 @@ function Game({
           }
         />
       )}
-      {room.phase === "complete" && <Complete room={room} />}
+      {room.phase === "complete" && (
+        <Complete room={room} onReturnHome={() => onReturnHome()} />
+      )}
 
-      {(room.phase === "lobby" || room.phase === "complete") && (
+      {room.phase === "lobby" && (
         <button
           className="text-button leave"
           disabled={pending}
           onClick={onLeave}
         >
-          Forget this saved seat
+          Leave room
         </button>
       )}
     </main>
@@ -1519,7 +1502,13 @@ function RevealModifierCard({ room }: { room: RoomView }) {
   );
 }
 
-function Complete({ room }: { room: RoomView }) {
+function Complete({
+  room,
+  onReturnHome,
+}: {
+  room: RoomView;
+  onReturnHome: () => void;
+}) {
   const summary = room.session_summary;
   if (summary) {
     return (
@@ -1592,6 +1581,9 @@ function Complete({ room }: { room: RoomView }) {
             </article>
           ))}
         </div>
+        <button className="button primary completion-home" onClick={onReturnHome}>
+          Return home
+        </button>
       </section>
     );
   }
@@ -1612,6 +1604,9 @@ function Complete({ room }: { room: RoomView }) {
           </article>
         ))}
       </div>
+      <button className="button primary completion-home" onClick={onReturnHome}>
+        Return home
+      </button>
     </section>
   );
 }

@@ -40,34 +40,21 @@ def _create_two_player_room(client: TestClient) -> tuple[str, dict, dict]:
     return code, created, joined_response.json()
 
 
-def test_private_invite_can_be_required_for_new_seats() -> None:
-    store = RoomStore(require_invite_token=True)
-    client = TestClient(create_app(store))
-    created = client.post(
+def test_rooms_use_code_only_joining_and_do_not_expose_invites() -> None:
+    client = TestClient(create_app(RoomStore()))
+    created_response = client.post(
         "/api/rooms",
         headers=_auth(_new_access_token()),
         json={"host_name": "Host"},
-    ).json()
+    )
+    assert created_response.status_code == 201
+    created = created_response.json()
     code = created["room"]["code"]
-    invite_token = created["invite_token"]
-    assert len(invite_token) == 43
-
-    missing = client.post(
-        f"/api/rooms/{code}/players",
-        headers=_auth(_new_access_token()),
-        json={"name": "Missing"},
-    )
-    assert missing.status_code == 409
-    invalid = client.post(
-        f"/api/rooms/{code}/players",
-        headers=_auth(_new_access_token()),
-        json={"name": "Invalid", "invite_token": _new_access_token()},
-    )
-    assert invalid.status_code == 409
+    assert "invite_token" not in created
     joined = client.post(
         f"/api/rooms/{code}/players",
         headers=_auth(_new_access_token()),
-        json={"name": "Guest", "invite_token": invite_token},
+        json={"name": "Guest"},
     )
     assert joined.status_code == 201
     assert joined.json()["player_name"] == "Guest"
@@ -358,6 +345,31 @@ def test_guest_token_cannot_perform_host_actions() -> None:
         ).status_code
         == 200
     )
+
+
+def test_only_host_can_end_room_and_every_session_is_revoked() -> None:
+    client = TestClient(create_app(RoomStore()))
+    code, host, guest = _create_two_player_room(client)
+
+    rejected = client.delete(
+        f"/api/rooms/{code}",
+        headers=_auth(guest["access_token"]),
+    )
+    assert rejected.status_code == 409
+    assert rejected.json() == {"detail": "Only the host can end the game."}
+
+    ended = client.delete(
+        f"/api/rooms/{code}",
+        headers=_auth(host["access_token"]),
+    )
+    assert ended.status_code == 204
+    assert ended.content == b""
+    for participant in (host, guest):
+        expired = client.get(
+            "/api/session",
+            headers=_auth(participant["access_token"]),
+        )
+        assert expired.status_code == 401
 
 
 def _client_at_second_round(modifier_type: str) -> tuple[TestClient, str, str, str]:

@@ -4,8 +4,7 @@ create table if not exists public.rooms (
     format_version integer not null,
     revision bigint not null default 0,
     created_at timestamptz not null default current_timestamp,
-    updated_at timestamptz not null default current_timestamp,
-    invite_hash bytea
+    updated_at timestamptz not null default current_timestamp
 );
 
 create table if not exists public.player_sessions (

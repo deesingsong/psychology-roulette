@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-import hmac
 import math
 import os
 import secrets
@@ -65,16 +64,6 @@ def configured_room_ttl_seconds() -> int:
     return value
 
 
-def configured_require_invite_token() -> bool:
-    raw_value = os.environ.get("PSYCHOLOGY_ROULETTE_REQUIRE_INVITE_TOKEN", "false")
-    normalized = raw_value.strip().casefold()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise RuntimeError("PSYCHOLOGY_ROULETTE_REQUIRE_INVITE_TOKEN must be true or false.")
-
-
 class RoomRepository(Protocol):
     """Storage contract shared by local SQLite and hosted Postgres backends."""
 
@@ -82,15 +71,13 @@ class RoomRepository(Protocol):
         self,
         host_name: str,
         access_token: str | None = None,
-        invite_token: str | None = None,
-    ) -> tuple[Room, Player, str, str]: ...
+    ) -> tuple[Room, Player, str]: ...
 
     def join_room(
         self,
         code: str,
         name: str,
         access_token: str | None = None,
-        invite_token: str | None = None,
     ) -> tuple[Room, Player, str]: ...
 
     def get(self, code: str) -> Room: ...
@@ -117,6 +104,8 @@ class RoomRepository(Protocol):
 
     def prune_expired_rooms(self) -> int: ...
 
+    def end_room(self, code: str, access_token: str) -> None: ...
+
     def close(self) -> None: ...
 
 
@@ -128,13 +117,11 @@ class RoomStore:
         database_path: str | Path = ":memory:",
         *,
         room_ttl_seconds: int | None = DEFAULT_ROOM_TTL_SECONDS,
-        require_invite_token: bool = False,
     ) -> None:
         if room_ttl_seconds is not None and room_ttl_seconds < 1:
             raise ValueError("room_ttl_seconds must be positive or None.")
         self.database_path = str(database_path)
         self.room_ttl_seconds = room_ttl_seconds
-        self.require_invite_token = require_invite_token
         if self.database_path != ":memory:":
             Path(self.database_path).expanduser().resolve().parent.mkdir(
                 parents=True,
@@ -170,8 +157,7 @@ class RoomStore:
                 ),
                 updated_at TEXT NOT NULL DEFAULT (
                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                ),
-                invite_hash BLOB
+                )
             );
 
             CREATE TABLE IF NOT EXISTS player_sessions (
@@ -194,10 +180,6 @@ class RoomStore:
             );
             """
         )
-        room_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(rooms)")}
-        if "invite_hash" not in room_columns:
-            self._connection.execute("ALTER TABLE rooms ADD COLUMN invite_hash BLOB")
-
     @staticmethod
     def _normalize_code(code: str) -> str:
         return code.strip().upper()
@@ -227,19 +209,6 @@ class RoomStore:
     def _new_access_token() -> str:
         # token_urlsafe receives bytes of entropy; 32 bytes is 256 bits.
         return secrets.token_urlsafe(32)
-
-    @staticmethod
-    def _invite_from_access_token(access_token: str) -> str:
-        digest = hashlib.sha256(f"psychology-roulette:invite:v1:{access_token}".encode()).digest()
-        return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-
-    @classmethod
-    def _invite_hash(cls, invite_token: str) -> bytes:
-        try:
-            cls._validate_access_token(invite_token)
-        except UnknownAccessToken as exc:
-            raise GameError("That private invite link is invalid.") from exc
-        return hashlib.sha256(invite_token.encode("utf-8")).digest()
 
     def _begin_write(self) -> None:
         self._connection.execute("BEGIN IMMEDIATE")
@@ -345,25 +314,6 @@ class RoomStore:
                 self._rollback()
                 raise
 
-    def _stored_invite_hash(self, code: str) -> bytes | None:
-        row = self._connection.execute(
-            "SELECT invite_hash FROM rooms WHERE code = ?",
-            (code,),
-        ).fetchone()
-        if row is None:
-            raise GameError("Room not found.")
-        return row["invite_hash"]
-
-    def _require_room_invite(self, code: str, invite_token: str | None) -> None:
-        if invite_token is None:
-            if self.require_invite_token:
-                raise GameError("Use the room's private invite link to join.")
-            return
-        presented_hash = self._invite_hash(invite_token)
-        stored_hash = self._stored_invite_hash(code)
-        if stored_hash is None or not hmac.compare_digest(stored_hash, presented_hash):
-            raise GameError("That private invite link is invalid.")
-
     def _save_room(self, room: Room) -> None:
         cursor = self._connection.execute(
             """
@@ -444,17 +394,10 @@ class RoomStore:
         self,
         host_name: str,
         access_token: str | None = None,
-        invite_token: str | None = None,
-    ) -> tuple[Room, Player, str, str]:
+    ) -> tuple[Room, Player, str]:
         """Create a room, its host, and the host credential as one durable unit."""
         active_token = access_token if access_token is not None else self._new_access_token()
-        active_invite = (
-            invite_token
-            if invite_token is not None
-            else self._invite_from_access_token(active_token)
-        )
         self._validate_access_token(active_token)
-        invite_hash = self._invite_hash(active_invite)
         normalized_name = self._normalized_name(host_name)
 
         with self._lock:
@@ -469,13 +412,8 @@ class RoomStore:
                 )
                 if existing is not None:
                     room, host = existing
-                    stored_hash = self._stored_invite_hash(room.code)
-                    if stored_hash is None or not hmac.compare_digest(stored_hash, invite_hash):
-                        raise AccessTokenConflict(
-                            "That access token is already assigned to a different invitation."
-                        )
                     self._commit()
-                    return room, host, active_token, active_invite
+                    return room, host, active_token
 
                 for _ in range(50):
                     code = "".join(secrets.choice(ROOM_ALPHABET) for _ in range(4))
@@ -493,19 +431,18 @@ class RoomStore:
                     host = room.add_player(host_name, is_host=True)
                     self._connection.execute(
                         """
-                        INSERT INTO rooms (code, state_json, format_version, invite_hash)
-                        VALUES (?, ?, ?, ?)
+                        INSERT INTO rooms (code, state_json, format_version)
+                        VALUES (?, ?, ?)
                         """,
                         (
                             room.code,
                             room_to_json(room),
                             SNAPSHOT_FORMAT_VERSION,
-                            invite_hash,
                         ),
                     )
                     self._insert_session(room.code, host.id, active_token)
                     self._commit()
-                    return room, host, active_token, active_invite
+                    return room, host, active_token
                 raise RuntimeError("Could not allocate a unique room code.")
             except Exception:
                 self._rollback()
@@ -516,7 +453,6 @@ class RoomStore:
         code: str,
         name: str,
         access_token: str | None = None,
-        invite_token: str | None = None,
     ) -> tuple[Room, Player, str]:
         """Join and issue a credential in the same transaction as the room update."""
         normalized = self._normalize_code(code)
@@ -539,12 +475,36 @@ class RoomStore:
                     return room, player, active_token
 
                 room = self._load_room(normalized)
-                self._require_room_invite(normalized, invite_token)
                 player = room.add_player(name)
                 self._save_room(room)
                 self._insert_session(room.code, player.id, active_token)
                 self._commit()
                 return room, player, active_token
+            except Exception:
+                self._rollback()
+                raise
+
+    def end_room(self, code: str, access_token: str) -> None:
+        """Delete a room and every participant credential after host authorization."""
+        normalized = self._normalize_code(code)
+        with self._lock:
+            self._prune_expired_rooms_locked()
+            try:
+                self._begin_write()
+                room_code, player_id = self._resolve_session(access_token)
+                if room_code != normalized:
+                    raise RoomAccessDenied("This access token does not belong to that room.")
+                room = self._load_room(normalized)
+                player = self._player_from_room(room, player_id)
+                if not player.is_host:
+                    raise GameError("Only the host can end the game.")
+                cursor = self._connection.execute(
+                    "DELETE FROM rooms WHERE code = ?",
+                    (normalized,),
+                )
+                if cursor.rowcount != 1:
+                    raise StoredRoomError(f"Room {normalized} disappeared while ending.")
+                self._commit()
             except Exception:
                 self._rollback()
                 raise
@@ -607,7 +567,6 @@ def configured_store() -> RoomRepository:
     database_url = os.environ.get("PSYCHOLOGY_ROULETTE_DATABASE_URL")
     settings = {
         "room_ttl_seconds": configured_room_ttl_seconds(),
-        "require_invite_token": configured_require_invite_token(),
     }
     if database_url:
         # Import lazily so local SQLite development does not require Postgres at startup.

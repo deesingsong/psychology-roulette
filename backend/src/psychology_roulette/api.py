@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -52,12 +52,10 @@ AccessToken = Annotated[str, Depends(require_access_token)]
 
 class CreateRoomRequest(BaseModel):
     host_name: str = Field(min_length=1, max_length=24)
-    invite_token: StrictStr | None = Field(default=None, min_length=43, max_length=43)
 
 
 class JoinRoomRequest(BaseModel):
     name: str = Field(min_length=1, max_length=24)
-    invite_token: StrictStr | None = Field(default=None, min_length=43, max_length=43)
 
 
 class SubmitAnswerRequest(BaseModel):
@@ -163,10 +161,6 @@ class ResumedRoomSessionView(BaseModel):
 
 class RoomSessionView(ResumedRoomSessionView):
     access_token: str
-
-
-class CreatedRoomSessionView(RoomSessionView):
-    invite_token: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,21 +426,19 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/api/rooms", response_model=CreatedRoomSessionView, status_code=201)
+    @app.post("/api/rooms", response_model=RoomSessionView, status_code=201)
     def create_room(
         request: CreateRoomRequest,
         http_request: Request,
         access_token: AccessToken,
-    ) -> CreatedRoomSessionView:
+    ) -> RoomSessionView:
         enforce_entry_limit(http_request, "create")
-        room, host, access_token, invite_token = active_store.create_room(
+        room, host, access_token = active_store.create_room(
             request.host_name,
             access_token,
-            request.invite_token,
         )
-        return CreatedRoomSessionView(
+        return RoomSessionView(
             access_token=access_token,
-            invite_token=invite_token,
             player_id=host.id,
             player_name=host.name,
             is_host=host.is_host,
@@ -480,7 +472,6 @@ def create_app(
             code,
             request.name,
             access_token,
-            request.invite_token,
         )
         return RoomSessionView(
             access_token=access_token,
@@ -549,6 +540,11 @@ def create_app(
             lambda active_room, player_id: active_room.advance(host_id=player_id),
         )
         return room_view(room)
+
+    @app.delete("/api/rooms/{code}", status_code=status.HTTP_204_NO_CONTENT)
+    def end_room(code: str, access_token: AccessToken) -> Response:
+        active_store.end_room(code, access_token)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/")
     def root() -> dict[str, str]:

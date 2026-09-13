@@ -75,6 +75,7 @@ async function request<T>(
       );
     }
 
+    if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   } catch (reason) {
     if (timedOut) {
@@ -96,23 +97,22 @@ function roomPath(code: string, suffix = "") {
 }
 
 export const api = {
-  createRoom(hostName: string, accessToken: string, inviteToken: string) {
+  createRoom(hostName: string, accessToken: string) {
     return request<RoomSessionView>("/api/rooms", {
       method: "POST",
       accessToken,
-      body: JSON.stringify({ host_name: hostName, invite_token: inviteToken }),
+      body: JSON.stringify({ host_name: hostName }),
     });
   },
   joinRoom(
     code: string,
     name: string,
     accessToken: string,
-    inviteToken: string | null,
   ) {
     return request<RoomSessionView>(roomPath(code, "/players"), {
       method: "POST",
       accessToken,
-      body: JSON.stringify({ name, invite_token: inviteToken }),
+      body: JSON.stringify({ name }),
     });
   },
   resume(accessToken: string, signal?: AbortSignal) {
@@ -161,6 +161,12 @@ export const api = {
   advance(code: string, accessToken: string) {
     return request<RoomView>(roomPath(code, "/advance"), {
       method: "POST",
+      accessToken,
+    });
+  },
+  endRoom(code: string, accessToken: string) {
+    return request<void>(roomPath(code), {
+      method: "DELETE",
       accessToken,
     });
   },

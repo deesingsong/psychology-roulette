@@ -36,13 +36,11 @@ def test_configured_store_uses_postgres_when_database_url_is_set(monkeypatch) ->
         "postgresql://example.invalid/postgres?sslmode=require",
     )
     monkeypatch.setenv("PSYCHOLOGY_ROULETTE_ROOM_TTL_SECONDS", "3600")
-    monkeypatch.setenv("PSYCHOLOGY_ROULETTE_REQUIRE_INVITE_TOKEN", "true")
 
     store = configured_store()
     try:
         assert isinstance(store, PostgresRoomStore)
         assert store.room_ttl_seconds == 3600
-        assert store.require_invite_token
         assert captured["conninfo"] == (
             "postgresql://example.invalid/postgres?sslmode=require"
         )

@@ -10,9 +10,9 @@ Psychology Roulette is not a personality test and does not infer diagnoses or fi
 
 - 3–8 players is the intended social range; two players are allowed during development.
 - A standard session contains six rounds and should last roughly 20–35 minutes.
-- Players join using a four-letter room code and a display name. Hosts can also share a private link containing a 256-bit invite token.
+- Players join using a four-letter room code and a display name.
 - Each seat receives a private reconnect credential that survives a browser refresh.
-- The host controls starting and advancing the session.
+- The host controls starting and advancing the session, and can end the game for the whole table at any time.
 - No account is required.
 
 ## Position scale
@@ -86,12 +86,12 @@ Creating a room, joining a seat, issuing its credential, and changing game state
 
 The browser generates one high-entropy participant credential for a create or join attempt and sends it as a Bearer credential. Retrying the same operation with the same credential returns the original seat, preventing a lost response from creating an unrecoverable player. The browser stores the credential locally and uses it to restore the server-authoritative player identity. The database stores only a SHA-256 digest. Room reads and actions reject missing, invalid, mismatched-reuse, or cross-room credentials, and request bodies cannot choose another player's identity.
 
-During an active round, the client does not allow a participant to discard the only credential for a required seat. A future authenticated leave or host-removal rule can replace this guard once its effects on incomplete rounds are specified.
+During an active round, the client does not allow a participant to discard the only credential for a required seat. When the final summary is reached, each browser removes its saved credential automatically and offers a direct return to the home screen. The summary remains visible until the player returns home, but refreshing after completion does not restore the old seat.
 
 ## Deployment boundary
 
 Participant credentials prevent room snapshots and actions from being read or changed with a room code alone. Room creation and joining consume persistent fixed-window rate-limit buckets keyed by a hash of the network client address. Abandoned rooms and their participant sessions are deleted after a configurable inactivity period.
 
-Every new room has a 256-bit private invite token whose SHA-256 digest is stored with the room. A deployment can require it for every new seat; the production Compose configuration does so by default. The host browser retains the token and copies a URL containing it. Manual code-only joins remain enabled by default in local development.
+Only the host participant credential can end a game. Ending early deletes the room and all of its participant sessions atomically. Other clients discover that the room has ended on their next poll, discard their local credentials, and return to the home screen.
 
 The container edge applies an additional create/join throttle, overwrites untrusted forwarded-address headers, serves the client and API from one origin, and adds browser security headers. The API container is internal-only. TLS termination, backups, monitoring, and machine-specific Oracle configuration remain deployment responsibilities.
