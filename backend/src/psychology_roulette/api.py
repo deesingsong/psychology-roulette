@@ -20,7 +20,7 @@ from psychology_roulette.domain import (
 )
 from psychology_roulette.store import (
     RoomAccessDenied,
-    RoomStore,
+    RoomRepository,
     UnknownAccessToken,
     default_store,
 )
@@ -353,7 +353,7 @@ def room_view(room: Room) -> RoomView:
 
 
 def create_app(
-    store: RoomStore | None = None,
+    store: RoomRepository | None = None,
     *,
     entry_rate_limits: EntryRateLimits | None = None,
 ) -> FastAPI:

@@ -9,7 +9,7 @@ Players privately take positions on thoughtful questions, predict one another, r
 - Create a room and receive a four-letter code.
 - Join from multiple devices or isolated browser profiles.
 - Recover the same private seat after a refresh or browser restart.
-- Preserve active rooms across server restarts with SQLite snapshots.
+- Preserve active rooms across server restarts with versioned snapshots.
 - Start a six-round game from a curated question pack.
 - Submit a private position and confidence rating.
 - Encounter occasional, deterministically selected round modifiers.
@@ -23,9 +23,9 @@ Players privately take positions on thoughtful questions, predict one another, r
 - Advance through the complete session.
 - Deterministic, testable game rules independent of the UI.
 
-Room state is stored as versioned SQLite snapshots. Each participant receives an unguessable reconnect credential; only its hash is stored by the server, and game actions derive the acting player from that credential. Private invitation tokens are also stored only as hashes. AI-authored contextual wording and Oracle deployment are intentionally deferred until the deterministic product is settled.
+Room state is stored as versioned snapshots: SQLite for local development and Postgres for hosted deployments. Each participant receives an unguessable reconnect credential; only its hash is stored by the server, and game actions derive the acting player from that credential. Private invitation tokens are also stored only as hashes. AI-authored contextual wording and Oracle deployment are intentionally deferred until the deterministic product is settled.
 
-Room snapshots and actions require participant credentials. Room create and join endpoints have SQLite-backed rate limits, and the production container adds edge throttling. Production mode requires the private invite URL by default; the four-letter-code-only flow remains available for local development.
+Room snapshots and actions require participant credentials. Room create and join endpoints have database-backed rate limits, and the production container adds edge throttling. Production mode requires the private invite URL by default; the four-letter-code-only flow remains available for local development.
 
 ## Architecture
 
@@ -38,7 +38,9 @@ FastAPI application
           |
           | atomic room mutations
           v
-SQLite snapshot store
+Repository interface
+      /             \
+SQLite (local)   Postgres (hosted)
           |
           v
 Pure Python game engine
@@ -100,6 +102,46 @@ uv run ruff check .
 ```
 
 See [docs/GAME_SPEC.md](docs/GAME_SPEC.md) for the current game rules and state-machine decisions.
+
+## Hosted deployment: Vercel + Supabase
+
+The repository is ready to run as one Vercel Services project: Vite serves the web
+client, FastAPI handles `/api/*`, and every function instance shares the same
+Supabase Postgres data. `vercel.json` contains the service routing, and
+`backend/main.py` is the hosted API entrypoint.
+
+1. Create a Supabase project and run
+   `supabase/migrations/20260913000000_create_game_store.sql` in its SQL editor.
+2. Copy the transaction-pooler connection string from **Connect** in Supabase.
+   Append `?sslmode=require` if the copied URL does not already specify SSL.
+3. Import this GitHub repository into Vercel and choose **Services** as the
+   Framework Preset.
+4. Add these Vercel environment variables:
+
+   ```text
+   PSYCHOLOGY_ROULETTE_DATABASE_URL=<Supabase transaction-pooler URL>
+   PSYCHOLOGY_ROULETTE_REQUIRE_INVITE_TOKEN=true
+   PSYCHOLOGY_ROULETTE_ROOM_TTL_SECONDS=604800
+   ```
+
+5. Deploy. Later pushes to the connected branch redeploy automatically; no local
+   launcher or always-on laptop is involved.
+
+The database URL is a server-only secret and must never use a `VITE_` prefix or be
+placed in frontend code. The adapter disables prepared statements and limits each
+warm function instance to one pooled connection, which matches Supabase's
+transaction-pooler guidance for serverless traffic. Postgres row locks serialize
+concurrent changes to a room, so separate Vercel instances cannot overwrite each
+other's answers or joins.
+
+Vercel's dynamic outbound addresses do not affect this database connection because
+the Supabase transaction pooler is a credential-authenticated public endpoint, not
+an Oracle IP allowlist.
+
+No Oracle-specific code is required for this deployment boundary. The future Qwen
+integration will be an optional HTTPS call made by FastAPI. A Cloudflare Tunnel can
+later publish only that authenticated Oracle endpoint; the core game remains usable
+when the AI endpoint is unavailable.
 
 ## Production container
 

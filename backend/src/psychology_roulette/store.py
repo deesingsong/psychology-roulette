@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from threading import RLock
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
 from psychology_roulette.content import load_questions
 from psychology_roulette.domain import GameError, Player, Room
@@ -73,6 +73,51 @@ def configured_require_invite_token() -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise RuntimeError("PSYCHOLOGY_ROULETTE_REQUIRE_INVITE_TOKEN must be true or false.")
+
+
+class RoomRepository(Protocol):
+    """Storage contract shared by local SQLite and hosted Postgres backends."""
+
+    def create_room(
+        self,
+        host_name: str,
+        access_token: str | None = None,
+        invite_token: str | None = None,
+    ) -> tuple[Room, Player, str, str]: ...
+
+    def join_room(
+        self,
+        code: str,
+        name: str,
+        access_token: str | None = None,
+        invite_token: str | None = None,
+    ) -> tuple[Room, Player, str]: ...
+
+    def get(self, code: str) -> Room: ...
+
+    def resume(self, access_token: str) -> tuple[Room, Player]: ...
+
+    def read(self, code: str, access_token: str) -> tuple[Room, Player]: ...
+
+    def mutate(
+        self,
+        code: str,
+        access_token: str,
+        operation: Callable[[Room, str], T],
+    ) -> Room: ...
+
+    def consume_rate_limit(
+        self,
+        bucket_key: str,
+        *,
+        limit: int,
+        window_seconds: int,
+        now: float | None = None,
+    ) -> int | None: ...
+
+    def prune_expired_rooms(self) -> int: ...
+
+    def close(self) -> None: ...
 
 
 class RoomStore:
@@ -558,8 +603,18 @@ class RoomStore:
             self._connection.close()
 
 
-default_store = RoomStore(
-    configured_database_path(),
-    room_ttl_seconds=configured_room_ttl_seconds(),
-    require_invite_token=configured_require_invite_token(),
-)
+def configured_store() -> RoomRepository:
+    database_url = os.environ.get("PSYCHOLOGY_ROULETTE_DATABASE_URL")
+    settings = {
+        "room_ttl_seconds": configured_room_ttl_seconds(),
+        "require_invite_token": configured_require_invite_token(),
+    }
+    if database_url:
+        # Import lazily so local SQLite development does not require Postgres at startup.
+        from psychology_roulette.postgres_store import PostgresRoomStore
+
+        return PostgresRoomStore(database_url, **settings)
+    return RoomStore(configured_database_path(), **settings)
+
+
+default_store: RoomRepository = configured_store()
