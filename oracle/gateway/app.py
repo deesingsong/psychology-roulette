@@ -8,7 +8,7 @@ from typing import Annotated, Any, Literal
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 bearer = HTTPBearer(auto_error=False)
 app = FastAPI(
@@ -57,6 +57,12 @@ class ContextResponse(BaseModel):
     contexts: list[ContextOutput]
 
 
+class GeneratedContextResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contexts: list[StrictStr] = Field(min_length=1, max_length=10)
+
+
 def require_gateway_token(
     credentials: Annotated[
         HTTPAuthorizationCredentials | None,
@@ -79,18 +85,43 @@ def require_gateway_token(
 
 
 def _prompt(request: ContextRequest) -> str:
-    source = [item.model_dump() for item in request.modifiers]
+    source = [
+        {
+            "question_prompt": item.question_prompt,
+            "category": item.category,
+            "values": item.values,
+            "modifier_title": item.modifier_title,
+            "canonical_instructions": item.canonical_instructions,
+        }
+        for item in request.modifiers
+    ]
     return (
         "/no_think. "
-        "Return JSON with one concise discussion angle for every input item. "
+        "Return JSON with one concise discussion angle for every input item, in "
+        "the exact same order. The contexts array must contain exactly "
+        f"{len(source)} strings. "
         "Each angle must be one sentence and at most 220 characters. It may pose a "
         "question or name a tension in the topic. It must not invent or change rules, "
-        "select players, assign targets, mention scoring, or give an answer to the "
-        "question. Preserve round_number, question_id, and modifier_type exactly. "
-        "Return only an object with a top-level contexts array. Every array item "
-        "must contain round_number, question_id, modifier_type, and context. INPUT: "
+        "select players, assign targets, mention scoring, or answer the question. "
+        "Return only an object with a top-level contexts array of strings. INPUT: "
         + json.dumps(source, ensure_ascii=False, separators=(",", ":"))
     )
+
+
+def _context_schema(count: int) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "contexts": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1, "maxLength": 220},
+                "minItems": count,
+                "maxItems": count,
+            }
+        },
+        "required": ["contexts"],
+        "additionalProperties": False,
+    }
 
 
 def _extract_json(text: str) -> Any:
@@ -102,27 +133,19 @@ def _extract_json(text: str) -> Any:
 
 
 def _validate_model_output(payload: Any, request: ContextRequest) -> ContextResponse:
-    response = ContextResponse.model_validate(payload)
-    expected = {
-        (item.round_number, item.question_id, item.modifier_type)
-        for item in request.modifiers
-    }
-    received = {
-        (item.round_number, item.question_id, item.modifier_type)
-        for item in response.contexts
-    }
-    if received != expected or len(response.contexts) != len(expected):
-        raise ValueError("Model response identifiers did not match the request.")
-    cleaned = [
+    generated = GeneratedContextResponse.model_validate(payload)
+    if len(generated.contexts) != len(request.modifiers):
+        raise ValueError("Model response context count did not match the request.")
+    contexts = [
         ContextOutput(
             round_number=item.round_number,
             question_id=item.question_id,
             modifier_type=item.modifier_type,
-            context=" ".join(item.context.split()),
+            context=" ".join(context.split()),
         )
-        for item in response.contexts
+        for item, context in zip(request.modifiers, generated.contexts, strict=True)
     ]
-    return ContextResponse(contexts=cleaned)
+    return ContextResponse(contexts=contexts)
 
 
 @app.get("/health")
@@ -161,7 +184,10 @@ async def modifier_contexts(
         "presence_penalty": 1.5,
         "max_tokens": 400,
         "cache_prompt": True,
-        "response_format": {"type": "json_object"},
+        "response_format": {
+            "type": "json_object",
+            "schema": _context_schema(len(request.modifiers)),
+        },
     }
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
