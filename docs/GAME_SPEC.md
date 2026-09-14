@@ -48,7 +48,7 @@ The opening round is always plain so players can learn the basic loop. Each late
 
 The engine selects only from modifier templates allowed by the current question. Target selection and scoring remain deterministic server responsibilities. Tests can inject a fixed seed for exact reproducibility, but production seeds are never serialized. Targeted challenges are drawn from the least-targeted players and avoid an immediate repeat whenever another equally fair player is available. After a Steelman round is answered, the server assigns the selected writer the other player whose recorded position is furthest from theirs.
 
-At game start, Qwen generates the complete six-question pack. Every question includes its own discussion prompt, relevant values, allowed modifier primitives, and a short surprise angle. The server validates all fields before starting or persisting the session. Invalid output is retried behind a constrained JSON schema; it does not trigger an immediate curated fallback. Curated questions are used only when the AI service is unavailable. If repeated responses remain invalid, the room stays in the lobby so the host can retry.
+At game start, Qwen generates the complete six-question pack. Every question includes its own discussion/surprise angle, category, intensity, and relevant values; the server attaches the supported modifier primitives. The server validates all fields before starting or persisting the session. Invalid output is retried behind a constrained JSON schema; it does not trigger an immediate curated fallback. Curated questions are used only when the AI service is unavailable. If repeated responses remain invalid, the room stays in the lobby so the host can retry.
 
 Initial modifier families:
 
@@ -76,7 +76,7 @@ Once the final round is ready to close, the server derives an exact fact catalog
 
 ## Content
 
-Normal games use fresh AI-generated question records containing a category, intensity, relevant values, allowed modifier primitives, a discussion prompt, and a surprise angle. The curated JSON pack remains only as the unavailable-service fallback.
+Normal games use fresh AI-generated question records containing a category, intensity, relevant values, and a discussion/surprise angle. The server adds its supported modifier primitives. The curated JSON pack remains only as the unavailable-service fallback.
 
 ## Persistence and reconnect
 

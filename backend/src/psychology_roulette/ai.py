@@ -21,7 +21,7 @@ from psychology_roulette.domain import (
 MAX_RESPONSE_BYTES = 128 * 1024
 MAX_QUESTION_LENGTH = 320
 MAX_COPY_LENGTH = 240
-SUPPORTED_MODIFIERS = {item.value for item in ModifierType}
+SUPPORTED_MODIFIERS = tuple(item.value for item in ModifierType)
 VALUE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
 
 
@@ -111,19 +111,8 @@ class HttpAIProvider:
             if type(intensity) is not int or intensity not in {1, 2, 3}:
                 raise AIInvalidOutput("The AI service returned an invalid intensity.")
             values = _unique_slugs(raw.get("values"), "values", minimum=2, maximum=4)
-            modifiers = _unique_slugs(
-                raw.get("modifiers_allowed"),
-                "modifiers_allowed",
-                minimum=1,
-                maximum=len(SUPPORTED_MODIFIERS),
-            )
-            if not set(modifiers).issubset(SUPPORTED_MODIFIERS):
-                raise AIInvalidOutput("The AI service returned an unsupported modifier.")
             discussion_prompt = _clean_text(
                 raw.get("discussion_prompt"), MAX_COPY_LENGTH, minimum=12
-            )
-            modifier_context = _clean_text(
-                raw.get("modifier_context"), MAX_COPY_LENGTH, minimum=12
             )
             questions.append(
                 Question(
@@ -132,9 +121,9 @@ class HttpAIProvider:
                     category=category,
                     intensity=intensity,
                     values=values,
-                    modifiers_allowed=modifiers,
+                    modifiers_allowed=SUPPORTED_MODIFIERS,
                     discussion_prompt=discussion_prompt,
-                    modifier_context=modifier_context,
+                    modifier_context=discussion_prompt,
                 )
             )
         return GameContent(questions=tuple(questions))

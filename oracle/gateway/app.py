@@ -42,9 +42,7 @@ class GeneratedQuestion(BaseModel):
     category: StrictStr = Field(pattern=r"^[a-z][a-z0-9_]{1,39}$")
     intensity: Literal[1, 2, 3]
     values: list[StrictStr] = Field(min_length=2, max_length=4)
-    modifiers_allowed: list[ModifierName] = Field(min_length=1, max_length=5)
     discussion_prompt: StrictStr = Field(min_length=12, max_length=240)
-    modifier_context: StrictStr = Field(min_length=12, max_length=240)
 
 
 class GameContentResponse(BaseModel):
@@ -112,25 +110,18 @@ def _game_content_prompt(request: GameContentRequest) -> str:
         f"{request.round_count} original statements. Players rate agreement from -100 "
         "to +100. Every prompt must be debatable, understandable without specialist "
         "knowledge, non-diagnostic, and meaningfully different from the others. Use at "
-        "least four categories across the pack. Avoid trivia, personal-data requests, "
+        "several categories across the pack. Avoid trivia, personal-data requests, "
         "graphic harm, targeted politics, and a plainly correct answer. A discussion_prompt "
-        "is one question that opens the value tension. A modifier_context is one concise "
-        "angle usable with any surprise mechanic; it must not invent rules, targets, or "
-        "scores. Values are 2-4 lowercase snake_case principles. modifiers_allowed contains "
-        "only supported names. Return only the required JSON object. Do not repeat these "
+        "is one concise question that opens the value tension and can also serve as a "
+        "surprise-round angle; it must not invent rules, targets, or scores. Values are 2-4 "
+        "lowercase snake_case principles. Return only the required JSON object. Do not "
+        "repeat these "
         "existing prompts: "
         + json.dumps(request.avoid_prompts, ensure_ascii=False, separators=(",", ":"))
     )
 
 
 def _game_content_schema(count: int) -> dict[str, Any]:
-    modifier_names = [
-        "predict_room",
-        "secret_principle",
-        "devils_advocate",
-        "steelman",
-        "change_my_mind",
-    ]
     return {
         "type": "object",
         "properties": {
@@ -157,19 +148,7 @@ def _game_content_schema(count: int) -> dict[str, Any]:
                                 "pattern": "^[a-z][a-z0-9_]{1,39}$",
                             },
                         },
-                        "modifiers_allowed": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": 5,
-                            "uniqueItems": True,
-                            "items": {"type": "string", "enum": modifier_names},
-                        },
                         "discussion_prompt": {
-                            "type": "string",
-                            "minLength": 12,
-                            "maxLength": 240,
-                        },
-                        "modifier_context": {
                             "type": "string",
                             "minLength": 12,
                             "maxLength": 240,
@@ -180,9 +159,7 @@ def _game_content_schema(count: int) -> dict[str, Any]:
                         "category",
                         "intensity",
                         "values",
-                        "modifiers_allowed",
                         "discussion_prompt",
-                        "modifier_context",
                     ],
                     "additionalProperties": False,
                 },
@@ -257,8 +234,6 @@ def _validate_game_content(payload: Any, request: GameContentRequest) -> GameCon
     avoided = {" ".join(item.split()).casefold() for item in request.avoid_prompts}
     if len(prompts) != request.round_count or prompts & avoided:
         raise ValueError("Question pack contained a duplicate prompt.")
-    if len({item.category for item in generated.questions}) < min(4, request.round_count):
-        raise ValueError("Question pack was not diverse enough.")
     discussions = {
         " ".join(item.discussion_prompt.split()).casefold() for item in generated.questions
     }
@@ -267,8 +242,6 @@ def _validate_game_content(payload: Any, request: GameContentRequest) -> GameCon
     for item in generated.questions:
         if len(set(item.values)) != len(item.values):
             raise ValueError("Question values must be unique.")
-        if len(set(item.modifiers_allowed)) != len(item.modifiers_allowed):
-            raise ValueError("Question modifiers must be unique.")
     return generated
 
 
@@ -369,7 +342,7 @@ async def game_content(
         prompt=_game_content_prompt(request),
         schema=_game_content_schema(request.round_count),
         validator=lambda payload: _validate_game_content(payload, request),
-        max_tokens=1500,
+        max_tokens=750,
         temperature=0.95,
     )
 

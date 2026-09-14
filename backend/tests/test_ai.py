@@ -49,12 +49,8 @@ def test_http_provider_generates_and_validates_a_fresh_question_pack(monkeypatch
                             "category": f"category_{number}",
                             "intensity": 2,
                             "values": ["autonomy", "fairness"],
-                            "modifiers_allowed": ["predict_room", "steelman"],
                             "discussion_prompt": (
                                 f"Which value changes how you read statement {number}?"
-                            ),
-                            "modifier_context": (
-                                f"Notice the hidden tradeoff inside statement {number}."
                             ),
                         }
                         for number in range(1, 7)
@@ -82,6 +78,14 @@ def test_http_provider_generates_and_validates_a_fresh_question_pack(monkeypatch
     assert len(result.questions) == 6
     assert len({question.id for question in result.questions}) == 6
     assert result.questions[0].discussion_prompt.startswith("Which value")
+    assert result.questions[0].modifier_context == result.questions[0].discussion_prompt
+    assert set(result.questions[0].modifiers_allowed) == {
+        "predict_room",
+        "secret_principle",
+        "devils_advocate",
+        "steelman",
+        "change_my_mind",
+    }
 
 
 def test_http_provider_rejects_duplicate_generated_questions(monkeypatch) -> None:
@@ -98,9 +102,7 @@ def test_http_provider_rejects_duplicate_generated_questions(monkeypatch) -> Non
                 "category": "ethics",
                 "intensity": 1,
                 "values": ["care", "fairness"],
-                "modifiers_allowed": ["predict_room"],
                 "discussion_prompt": "What principle is in tension here?",
-                "modifier_context": "Consider what each side is trying to protect.",
             }
             return json.dumps({"questions": [question, question]}).encode()
 

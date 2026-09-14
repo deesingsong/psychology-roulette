@@ -18,9 +18,7 @@ def _question(number: int) -> dict:
         "category": f"category_{number}",
         "intensity": 2,
         "values": ["autonomy", "fairness"],
-        "modifiers_allowed": ["predict_room", "steelman"],
         "discussion_prompt": f"Which principle shapes statement {number} most?",
-        "modifier_context": f"Look for the tradeoff hidden in statement {number}.",
     }
 
 
