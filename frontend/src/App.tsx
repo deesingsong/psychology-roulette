@@ -514,10 +514,10 @@ function Landing({ notice, onSession }: LandingProps) {
     <main className="landing shell">
       <div className="brand-row">
         <span className="brand-mark">PR</span>
-        <span>PSYCHOLOGY ROULETTE</span>
+        <span>ARE YOU NICHE OR NPC?</span>
       </div>
       <section className="hero">
-        <p className="eyebrow">A SOCIAL REASONING GAME</p>
+        <p className="eyebrow">A SOCIAL PARTY GAME</p>
         <h1>How well do you understand the room?</h1>
         <p className="lede">
           Take a position. Read your friends. Defend the argument you disagree
@@ -707,7 +707,7 @@ function Game({
       <header className="game-header">
         <div className="brand-row compact">
           <span className="brand-mark">PR</span>
-          <span>PSYCHOLOGY ROULETTE</span>
+          <span>ARE YOU NICHE OR NPC?</span>
         </div>
         <button className="room-chip" onClick={() => void copyText(room.code)}>
           ROOM <strong>{room.code}</strong>
