@@ -1044,7 +1044,7 @@ function ModifierStage({
   return (
     <section className="stage modifier-stage">
       <div className="modifier-heading">
-        <span className="modifier-badge">OCCASIONAL MODIFIER</span>
+        <span className="modifier-badge">SURPRISE MODIFIER</span>
         <p className="eyebrow">ROUND {room.round_number}</p>
         <h1>{modifier.title}</h1>
         <p className="lede">{modifier.instructions}</p>
@@ -1372,8 +1372,8 @@ function Reveal({
         <div className="discussion-card">
           <span>DISCUSSION PROMPT</span>
           <p>
-            Who is furthest from the room—and what value is their answer
-            protecting?
+            {room.question?.discussion_prompt ??
+              "Who is furthest from the room—and what value is their answer protecting?"}
           </p>
         </div>
       )}
@@ -1527,13 +1527,27 @@ function Complete({
 }) {
   const summary = room.session_summary;
   if (summary) {
+    const recap = room.session_recap;
     return (
       <section className="stage complete-stage">
         <p className="eyebrow">SESSION COMPLETE</p>
-        <h1>Tonight's table</h1>
+        <h1>{recap?.headline ?? "Tonight's table"}</h1>
         <p className="lede">
-          {summary.rounds_completed} rounds, mapped without diagnosing anyone.
+          {recap?.summary ??
+            `${summary.rounds_completed} rounds, mapped without diagnosing anyone.`}
         </p>
+        {recap && (
+          <div className="recap-grid">
+            {recap.highlights.map((item) => (
+              <article key={item.fact_id}>
+                <span>{item.title}</span>
+                <strong>{item.value}</strong>
+                <small>{item.detail}</small>
+                <p>{item.commentary}</p>
+              </article>
+            ))}
+          </div>
+        )}
         <div className="stat-grid final-stats">
           <article>
             <span>TABLE AVERAGE</span>

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -13,9 +14,11 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, StrictInt, StrictStr
 
 from psychology_roulette.ai import (
-    ModifierContextProvider,
-    apply_modifier_contexts,
-    configured_modifier_context_provider,
+    AIInvalidOutput,
+    AIProvider,
+    AIServiceUnavailable,
+    GameContent,
+    configured_ai_provider,
 )
 from psychology_roulette.domain import (
     GameError,
@@ -87,6 +90,7 @@ class QuestionView(BaseModel):
     category: str
     intensity: int
     values: list[str]
+    discussion_prompt: str | None
 
 
 class RevealedAnswerView(BaseModel):
@@ -147,6 +151,20 @@ class SessionAnalyticsView(BaseModel):
     players: list[PlayerAnalyticsView]
 
 
+class RecapHighlightView(BaseModel):
+    fact_id: str
+    title: str
+    value: str
+    detail: str
+    commentary: str
+
+
+class SessionRecapView(BaseModel):
+    headline: str
+    summary: str
+    highlights: list[RecapHighlightView]
+
+
 class RoomView(BaseModel):
     code: str
     phase: RoomPhase
@@ -158,6 +176,7 @@ class RoomView(BaseModel):
     summary: dict[str, float | int] | None
     modifier: ModifierView | None
     session_summary: SessionAnalyticsView | None
+    session_recap: SessionRecapView | None
 
 
 class ResumedRoomSessionView(BaseModel):
@@ -240,6 +259,7 @@ def room_view(room: Room) -> RoomView:
             category=current_round.question.category,
             intensity=current_round.question.intensity,
             values=list(current_round.question.values),
+            discussion_prompt=current_round.question.discussion_prompt,
         )
 
     modifier_view = None
@@ -329,6 +349,23 @@ def room_view(room: Room) -> RoomView:
             ],
         )
 
+    session_recap = None
+    if room.session_recap is not None:
+        session_recap = SessionRecapView(
+            headline=room.session_recap.headline,
+            summary=room.session_recap.summary,
+            highlights=[
+                RecapHighlightView(
+                    fact_id=item.fact_id,
+                    title=item.title,
+                    value=item.value,
+                    detail=item.detail,
+                    commentary=item.commentary,
+                )
+                for item in room.session_recap.highlights
+            ],
+        )
+
     return RoomView(
         code=room.code,
         phase=room.phase,
@@ -352,17 +389,29 @@ def room_view(room: Room) -> RoomView:
         summary=room.round_summary(),
         modifier=modifier_view,
         session_summary=session_summary,
+        session_recap=session_recap,
     )
+
+
+def _start_with_content(room: Room, player_id: str, content: GameContent) -> None:
+    room.questions = list(content.questions)
+    room.start(host_id=player_id)
+
+
+def _advance_with_recap(room: Room, player_id: str, recap) -> None:
+    room.advance(host_id=player_id)
+    if room.phase is RoomPhase.COMPLETE:
+        room.session_recap = recap
 
 
 def create_app(
     store: RoomRepository | None = None,
     *,
     entry_rate_limits: EntryRateLimits | None = None,
-    modifier_context_provider: ModifierContextProvider | None = None,
+    ai_provider: AIProvider | None = None,
 ) -> FastAPI:
     app = FastAPI(
-        title="Psychology Roulette API",
+        title="Are You Niche or NPC? API",
         description="Authoritative multiplayer game server.",
         version="0.1.0",
     )
@@ -375,11 +424,7 @@ def create_app(
     )
     active_store = store if store is not None else default_store
     active_rate_limits = entry_rate_limits or EntryRateLimits.from_environment()
-    active_context_provider = (
-        modifier_context_provider
-        if modifier_context_provider is not None
-        else configured_modifier_context_provider()
-    )
+    active_ai_provider = ai_provider if ai_provider is not None else configured_ai_provider()
 
     def enforce_entry_limit(request: Request, action: str) -> None:
         client_host = request.client.host if request.client else "unknown"
@@ -435,6 +480,21 @@ def create_app(
         return JSONResponse(
             status_code=403,
             content={"detail": "This access token does not belong to that room."},
+        )
+
+    @app.exception_handler(AIInvalidOutput)
+    async def invalid_ai_output_handler(
+        _request: Request,
+        _exc: AIInvalidOutput,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": (
+                    "Qwen could not create valid game content after several attempts. "
+                    "Please try again."
+                )
+            },
         )
 
     @app.get("/api/health")
@@ -498,24 +558,31 @@ def create_app(
 
     @app.post("/api/rooms/{code}/start", response_model=RoomView)
     def start_room(code: str, access_token: AccessToken) -> RoomView:
+        room, player = active_store.read(code, access_token)
+        if not player.is_host:
+            raise GameError("Only the host can do that.")
+        if active_ai_provider is not None:
+            try:
+                content = active_ai_provider.generate_game_content(
+                    round_count=6,
+                    avoid_questions=tuple(room.questions),
+                )
+            except AIServiceUnavailable:
+                logger.exception("Qwen is unavailable; starting with curated questions.")
+            else:
+                room = active_store.mutate(
+                    code,
+                    access_token,
+                    lambda active_room, player_id: _start_with_content(
+                        active_room, player_id, content
+                    ),
+                )
+                return room_view(room)
         room = active_store.mutate(
             code,
             access_token,
             lambda active_room, player_id: active_room.start(host_id=player_id),
         )
-        if active_context_provider is not None:
-            try:
-                contexts = active_context_provider.generate(room)
-                if contexts:
-                    room = active_store.mutate(
-                        code,
-                        access_token,
-                        lambda active_room, _player_id: apply_modifier_contexts(
-                            active_room, contexts
-                        ),
-                    )
-            except Exception:
-                logger.exception("Optional modifier context generation failed.")
         return room_view(room)
 
     @app.post("/api/rooms/{code}/answers", response_model=RoomView)
@@ -562,6 +629,26 @@ def create_app(
 
     @app.post("/api/rooms/{code}/advance", response_model=RoomView)
     def advance_round(code: str, access_token: AccessToken) -> RoomView:
+        if active_ai_provider is not None:
+            preview, player = active_store.read(code, access_token)
+            candidate = deepcopy(preview)
+            candidate.advance(host_id=player.id)
+            if candidate.phase is RoomPhase.COMPLETE:
+                try:
+                    recap = active_ai_provider.generate_session_recap(candidate)
+                except AIServiceUnavailable:
+                    logger.exception(
+                        "Qwen is unavailable; completing with deterministic statistics."
+                    )
+                else:
+                    room = active_store.mutate(
+                        code,
+                        access_token,
+                        lambda active_room, player_id: _advance_with_recap(
+                            active_room, player_id, recap
+                        ),
+                    )
+                    return room_view(room)
         room = active_store.mutate(
             code,
             access_token,

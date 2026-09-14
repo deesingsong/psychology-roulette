@@ -791,6 +791,39 @@ footer {
   margin: 34px 0;
   text-align: left;
 }
+.recap-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin: 34px 0;
+  text-align: left;
+}
+.recap-grid article {
+  display: grid;
+  gap: 8px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(145deg, rgba(156, 124, 255, 0.1), var(--panel));
+}
+.recap-grid span {
+  color: var(--violet);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.recap-grid strong {
+  font: 700 clamp(1.2rem, 3vw, 1.75rem)/1.2 "Manrope";
+}
+.recap-grid small,
+.recap-grid p {
+  color: var(--muted);
+}
+.recap-grid p {
+  margin: 5px 0 0;
+  line-height: 1.55;
+}
 .round-history {
   display: grid;
   gap: 12px;
@@ -954,6 +987,7 @@ footer {
   }
   .principle-grid,
   .modifier-result-grid,
+  .recap-grid,
   .player-summary-grid {
     grid-template-columns: 1fr;
   }

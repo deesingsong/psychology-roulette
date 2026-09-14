@@ -35,6 +35,8 @@ class Question:
     intensity: int
     values: tuple[str, ...]
     modifiers_allowed: tuple[str, ...]
+    discussion_prompt: str | None = None
+    modifier_context: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,3 +121,19 @@ class SessionAnalytics:
     total_position_changes: int
     rounds: tuple[RoundAnalytics, ...]
     players: tuple[PlayerAnalytics, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RecapHighlight:
+    fact_id: str
+    title: str
+    value: str
+    detail: str
+    commentary: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRecap:
+    headline: str
+    summary: str
+    highlights: tuple[RecapHighlight, ...]

@@ -2,9 +2,9 @@ import secrets
 
 from fastapi.testclient import TestClient
 
-from psychology_roulette.ai import ModifierContext
+from psychology_roulette.ai import AIInvalidOutput, AIServiceUnavailable, GameContent
 from psychology_roulette.api import EntryRateLimits, create_app
-from psychology_roulette.domain import ModifierType, Question
+from psychology_roulette.domain import Question, RecapHighlight, SessionRecap
 from psychology_roulette.store import RoomStore
 
 
@@ -416,61 +416,59 @@ def _client_at_second_round(modifier_type: str) -> tuple[TestClient, str, str, s
     return client, code, host_token, guest_token
 
 
-def test_start_attaches_optional_ai_context_without_changing_modifier_rules() -> None:
+def test_start_uses_fresh_ai_questions_and_attaches_generated_round_copy() -> None:
     store = RoomStore()
-    original_instructions = []
 
-    class ContextProvider:
-        def generate(self, room):
-            modifier = room.rounds[1].modifier
-            assert modifier is not None
-            assert modifier.target_player_id is not None
-            original_instructions.append(modifier.instructions)
-            return (
-                ModifierContext(
-                    round_number=2,
-                    question_id="api-q2",
-                    modifier_type=ModifierType.DEVILS_ADVOCATE,
-                    text="Ask which hidden tradeoff the opposing view protects.",
-                ),
+    class AIProvider:
+        def generate_game_content(self, *, round_count, avoid_questions):
+            assert round_count == 6
+            assert avoid_questions
+            return GameContent(
+                questions=tuple(
+                    Question(
+                        id=f"ai-q{number}",
+                        prompt=f"Fresh AI question {number} for this exact game.",
+                        category="ethics",
+                        intensity=1,
+                        values=("fairness", "care"),
+                        modifiers_allowed=("devils_advocate",) if number == 2 else (),
+                        discussion_prompt=f"Discuss the tension in round {number}.",
+                        modifier_context=f"Explore the hidden tradeoff in round {number}.",
+                    )
+                    for number in range(1, 7)
+                )
             )
 
-    client = TestClient(create_app(store, modifier_context_provider=ContextProvider()))
+        def generate_session_recap(self, _room):
+            raise AssertionError("A recap is not requested at game start.")
+
+    client = TestClient(create_app(store, ai_provider=AIProvider()))
     code, host, _guest = _create_two_player_room(client)
     host_token = host["access_token"]
 
     def configure(room, _player_id: str) -> None:
         room.modifier_chance = 1
-        room.questions = [
-            Question(
-                id=f"api-q{number}",
-                prompt=f"API question {number}",
-                category="ethics",
-                intensity=1,
-                values=("fairness", "care"),
-                modifiers_allowed=("devils_advocate",) if number == 2 else (),
-            )
-            for number in range(1, 7)
-        ]
+        room.modifier_seed = "fresh-ai-test"
 
     store.mutate(code, host_token, configure)
     response = client.post(f"/api/rooms/{code}/start", headers=_auth(host_token))
     assert response.status_code == 200
+    assert response.json()["question"]["prompt"] == "Fresh AI question 1 for this exact game."
     saved_modifier = store.get(code).rounds[1].modifier
     assert saved_modifier is not None
-    assert saved_modifier.instructions == original_instructions[0]
-    assert saved_modifier.context == (
-        "Ask which hidden tradeoff the opposing view protects."
-    )
+    assert saved_modifier.context == "Explore the hidden tradeoff in round 2."
 
 
-def test_start_falls_back_to_curated_copy_when_ai_fails() -> None:
+def test_start_falls_back_to_curated_questions_only_when_ai_is_unavailable() -> None:
     class FailingProvider:
-        def generate(self, _room):
-            raise TimeoutError("offline")
+        def generate_game_content(self, **_kwargs):
+            raise AIServiceUnavailable("offline")
+
+        def generate_session_recap(self, _room):
+            raise AIServiceUnavailable("offline")
 
     client = TestClient(
-        create_app(RoomStore(), modifier_context_provider=FailingProvider())
+        create_app(RoomStore(), ai_provider=FailingProvider())
     )
     code, host, _guest = _create_two_player_room(client)
     response = client.post(
@@ -479,6 +477,26 @@ def test_start_falls_back_to_curated_copy_when_ai_fails() -> None:
     )
     assert response.status_code == 200
     assert response.json()["phase"] == "answering"
+
+
+def test_invalid_ai_content_keeps_room_in_lobby_for_retry() -> None:
+    store = RoomStore()
+
+    class InvalidProvider:
+        def generate_game_content(self, **_kwargs):
+            raise AIInvalidOutput("invalid")
+
+        def generate_session_recap(self, _room):
+            raise AssertionError
+
+    client = TestClient(create_app(store, ai_provider=InvalidProvider()))
+    code, host, _guest = _create_two_player_room(client)
+    response = client.post(
+        f"/api/rooms/{code}/start",
+        headers=_auth(host["access_token"]),
+    )
+    assert response.status_code == 503
+    assert store.get(code).phase.value == "lobby"
 
 
 def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
@@ -786,3 +804,67 @@ def test_default_six_round_api_session_reaches_completion() -> None:
     assert modifier_rounds >= 1
     assert room["session_summary"]["rounds_completed"] == 6
     assert len(room["session_summary"]["players"]) == 2
+
+
+def test_final_advance_persists_and_returns_ai_recap() -> None:
+    class RecapProvider:
+        def generate_game_content(self, *, round_count, avoid_questions):
+            assert round_count == 6
+            assert avoid_questions
+            return GameContent(
+                questions=tuple(
+                    Question(
+                        id=f"recap-q{number}",
+                        prompt=f"Generated recap test statement number {number}.",
+                        category="test",
+                        intensity=1,
+                        values=("care", "fairness"),
+                        modifiers_allowed=(),
+                        discussion_prompt=f"Discuss generated statement {number}.",
+                    )
+                    for number in range(1, 7)
+                )
+            )
+
+        def generate_session_recap(self, room):
+            assert room.phase.value == "complete"
+            return SessionRecap(
+                headline="The table found a fault line",
+                summary="Six rounds produced one especially memorable split.",
+                highlights=(
+                    RecapHighlight(
+                        fact_id="most_divisive",
+                        title="The big split",
+                        value="Round 4",
+                        detail="Range 100",
+                        commentary="This was the round everyone will bring up later.",
+                    ),
+                ),
+            )
+
+    store = RoomStore()
+    client = TestClient(create_app(store, ai_provider=RecapProvider()))
+    code, host, guest = _create_two_player_room(client)
+    host_token = host["access_token"]
+    guest_token = guest["access_token"]
+    room = client.post(f"/api/rooms/{code}/start", headers=_auth(host_token)).json()
+
+    for _number in range(1, 7):
+        client.post(
+            f"/api/rooms/{code}/answers",
+            headers=_auth(host_token),
+            json={"position": 67, "confidence": 80},
+        )
+        client.post(
+            f"/api/rooms/{code}/answers",
+            headers=_auth(guest_token),
+            json={"position": -33, "confidence": 60},
+        )
+        client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token))
+        room = client.post(
+            f"/api/rooms/{code}/advance", headers=_auth(host_token)
+        ).json()
+
+    assert room["phase"] == "complete"
+    assert room["session_recap"]["headline"] == "The table found a fault line"
+    assert store.get(code).session_recap is not None

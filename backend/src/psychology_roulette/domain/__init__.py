@@ -9,10 +9,12 @@ from .models import (
     Player,
     PlayerAnalytics,
     Question,
+    RecapHighlight,
     RoomPhase,
     Round,
     RoundAnalytics,
     SessionAnalytics,
+    SessionRecap,
 )
 
 __all__ = [
@@ -26,9 +28,11 @@ __all__ = [
     "Player",
     "PlayerAnalytics",
     "Question",
+    "RecapHighlight",
     "Room",
     "RoomPhase",
     "Round",
     "RoundAnalytics",
     "SessionAnalytics",
+    "SessionRecap",
 ]

@@ -4,8 +4,9 @@ This Worker provides a stable `workers.dev` HTTPS address without requiring a cu
 domain. Its Workers VPC binding reaches the Oracle gateway through the named
 Cloudflare Tunnel, so Oracle has no public AI ingress port.
 
-The Worker accepts only `GET /health` and `POST /v1/modifier-contexts`, enforces a
-64 KiB request limit, forwards only required headers, and streams the origin response.
+The Worker accepts only `GET /health`, `POST /v1/game-content`, and
+`POST /v1/session-recap`. It enforces a 64 KiB request limit, forwards only required
+headers, and streams the origin response.
 The Oracle gateway remains responsible for Bearer authentication and payload validation.
 
 ```powershell

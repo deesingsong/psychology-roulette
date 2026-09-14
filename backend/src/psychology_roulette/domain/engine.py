@@ -21,6 +21,7 @@ from .models import (
     Round,
     RoundAnalytics,
     SessionAnalytics,
+    SessionRecap,
 )
 
 POSITION_VALUES = {-100, -67, -33, 0, 33, 67, 100}
@@ -51,6 +52,7 @@ class Room:
     players: dict[str, Player] = field(default_factory=dict)
     rounds: list[Round] = field(default_factory=list)
     current_round_index: int = -1
+    session_recap: SessionRecap | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.modifier_chance <= 1:
@@ -96,6 +98,7 @@ class Room:
             Round(number=index + 1, question=question)
             for index, question in enumerate(self.questions[:round_count])
         ]
+        self.session_recap = None
         self._assign_modifiers()
         self.current_round_index = 0
         self.phase = RoomPhase.ANSWERING
@@ -380,6 +383,8 @@ class Room:
         """Plan the session once, using stable random seeds rather than process hash state."""
         for game_round in self.rounds[1:]:
             game_round.modifier = self._select_modifier(game_round, force=False)
+            if game_round.modifier:
+                game_round.modifier.context = game_round.question.modifier_context
 
         if self.modifier_chance > 0 and not any(game_round.modifier for game_round in self.rounds):
             # Keep the opening round simple, but guarantee one modifier later when possible.
@@ -387,6 +392,7 @@ class Room:
                 modifier = self._select_modifier(game_round, force=True)
                 if modifier:
                     game_round.modifier = modifier
+                    modifier.context = game_round.question.modifier_context
                     break
 
     def _select_modifier(self, game_round: Round, *, force: bool) -> Modifier | None:

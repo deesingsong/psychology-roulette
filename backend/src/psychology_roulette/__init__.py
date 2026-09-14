@@ -1,1 +1,1 @@
-"""Psychology Roulette game server."""
+"""Are You Niche or NPC? game server."""

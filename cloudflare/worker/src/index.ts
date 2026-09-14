@@ -1,5 +1,6 @@
 const MAX_REQUEST_BYTES = 64 * 1024;
 const ORIGIN = "http://gateway:8000";
+const GENERATION_PATHS = ["/v1/game-content", "/v1/session-recap"] as const;
 
 function jsonError(status: number, detail: string): Response {
   return Response.json(
@@ -54,7 +55,8 @@ export default {
     const url = new URL(request.url);
     const isHealth = request.method === "GET" && url.pathname === "/health";
     const isGeneration =
-      request.method === "POST" && url.pathname === "/v1/modifier-contexts";
+      request.method === "POST" &&
+      GENERATION_PATHS.some((path) => path === url.pathname);
     if (!isHealth && !isGeneration) {
       return jsonError(404, "Not found.");
     }
@@ -84,12 +86,12 @@ export default {
       if (authorization) headers.set("Authorization", authorization);
 
       const response = await env.ORACLE_NETWORK.fetch(
-        `${ORIGIN}/v1/modifier-contexts`,
+        `${ORIGIN}${url.pathname}`,
         {
           method: "POST",
           headers,
           body,
-          signal: AbortSignal.timeout(20_000),
+          signal: AbortSignal.timeout(55_000),
         },
       );
       return originResponse(response);

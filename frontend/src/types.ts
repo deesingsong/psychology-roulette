@@ -66,6 +66,20 @@ export interface SessionAnalytics {
   players: PlayerAnalytics[];
 }
 
+export interface RecapHighlight {
+  fact_id: string;
+  title: string;
+  value: string;
+  detail: string;
+  commentary: string;
+}
+
+export interface SessionRecap {
+  headline: string;
+  summary: string;
+  highlights: RecapHighlight[];
+}
+
 export interface PlayerView {
   name: string;
   is_host: boolean;
@@ -79,6 +93,7 @@ export interface QuestionView {
   category: string;
   intensity: number;
   values: string[];
+  discussion_prompt: string | null;
 }
 
 export interface RevealedAnswer {
@@ -98,6 +113,7 @@ export interface RoomView {
   summary: Record<string, number> | null;
   modifier: ModifierView | null;
   session_summary: SessionAnalytics | null;
+  session_recap: SessionRecap | null;
 }
 
 export interface RoomSessionView {

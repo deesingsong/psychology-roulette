@@ -13,9 +13,11 @@ from psychology_roulette.domain import (
     ModifierType,
     Player,
     Question,
+    RecapHighlight,
     Room,
     RoomPhase,
     Round,
+    SessionRecap,
 )
 
 SNAPSHOT_FORMAT_VERSION = 1
@@ -63,6 +65,8 @@ def _question_snapshot(question: Question) -> dict[str, Any]:
         "intensity": question.intensity,
         "values": list(question.values),
         "modifiers_allowed": list(question.modifiers_allowed),
+        "discussion_prompt": question.discussion_prompt,
+        "modifier_context": question.modifier_context,
     }
 
 
@@ -84,6 +88,62 @@ def _question_from_snapshot(value: Any, field: str) -> Question:
                 f"{field}.modifiers_allowed",
             )
         ),
+        discussion_prompt=(
+            _string(payload["discussion_prompt"], f"{field}.discussion_prompt")
+            if payload.get("discussion_prompt") is not None
+            else None
+        ),
+        modifier_context=(
+            _string(payload["modifier_context"], f"{field}.modifier_context")
+            if payload.get("modifier_context") is not None
+            else None
+        ),
+    )
+
+
+def _recap_snapshot(recap: SessionRecap | None) -> dict[str, Any] | None:
+    if recap is None:
+        return None
+    return {
+        "headline": recap.headline,
+        "summary": recap.summary,
+        "highlights": [
+            {
+                "fact_id": item.fact_id,
+                "title": item.title,
+                "value": item.value,
+                "detail": item.detail,
+                "commentary": item.commentary,
+            }
+            for item in recap.highlights
+        ],
+    }
+
+
+def _recap_from_snapshot(value: Any) -> SessionRecap | None:
+    if value is None:
+        return None
+    payload = _mapping(value, "room.session_recap")
+    highlights = tuple(
+        RecapHighlight(
+            fact_id=_string(item.get("fact_id"), "room.session_recap.highlights[].fact_id"),
+            title=_string(item.get("title"), "room.session_recap.highlights[].title"),
+            value=_string(item.get("value"), "room.session_recap.highlights[].value"),
+            detail=_string(item.get("detail"), "room.session_recap.highlights[].detail"),
+            commentary=_string(
+                item.get("commentary"),
+                "room.session_recap.highlights[].commentary",
+            ),
+        )
+        for item in (
+            _mapping(raw, "room.session_recap.highlights[]")
+            for raw in _list(payload.get("highlights"), "room.session_recap.highlights")
+        )
+    )
+    return SessionRecap(
+        headline=_string(payload.get("headline"), "room.session_recap.headline"),
+        summary=_string(payload.get("summary"), "room.session_recap.summary"),
+        highlights=highlights,
     )
 
 
@@ -211,6 +271,7 @@ def room_to_snapshot(room: Room) -> dict[str, Any]:
         "modifier_seed": room.modifier_seed,
         "phase": room.phase.value,
         "current_round_index": room.current_round_index,
+        "session_recap": _recap_snapshot(room.session_recap),
         "questions": [_question_snapshot(question) for question in room.questions],
         "players": [
             {"id": player.id, "name": player.name, "is_host": player.is_host}
@@ -354,6 +415,7 @@ def room_from_snapshot(value: Any) -> Room:
         players=players,
         rounds=rounds,
         current_round_index=current_round_index,
+        session_recap=_recap_from_snapshot(payload.get("session_recap")),
     )
 
 

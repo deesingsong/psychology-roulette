@@ -3,43 +3,34 @@ import json
 import pytest
 
 from psychology_roulette import ai
-from psychology_roulette.ai import HttpModifierContextProvider, apply_modifier_contexts
+from psychology_roulette.ai import AIInvalidOutput, HttpAIProvider
 from psychology_roulette.domain import Question, Room
 
 
-def _started_room() -> Room:
-    room = Room(
-        code="SECR",
-        questions=[
-            Question(
-                id="q1",
-                prompt="Opening question",
-                category="ethics",
-                intensity=1,
-                values=("care",),
-                modifiers_allowed=(),
-            ),
-            Question(
-                id="q2",
-                prompt="Should intent matter more than impact?",
-                category="ethics",
-                intensity=2,
-                values=("intent", "impact"),
-                modifiers_allowed=("devils_advocate",),
-            ),
-        ],
-        modifier_chance=1,
-        modifier_seed="ai-test",
+def _question(number: int) -> Question:
+    return Question(
+        id=f"curated-{number}",
+        prompt=f"Existing curated prompt number {number} should be avoided.",
+        category="ethics",
+        intensity=1,
+        values=("care", "fairness"),
+        modifiers_allowed=("predict_room",),
     )
+
+
+def _complete_room() -> Room:
+    room = Room(code="SECR", questions=[_question(1)], modifier_chance=0)
     host = room.add_player("Alice", is_host=True)
-    room.add_player("Bob")
-    room.start(host_id=host.id, round_count=2)
-    assert room.rounds[1].modifier is not None
+    guest = room.add_player("Bob")
+    room.start(host_id=host.id, round_count=1)
+    room.submit_answer(player_id=host.id, position=67, confidence=80)
+    room.submit_answer(player_id=guest.id, position=-33, confidence=60)
+    room.reveal(host_id=host.id)
+    room.advance(host_id=host.id)
     return room
 
 
-def test_http_provider_sends_only_curated_round_context(monkeypatch) -> None:
-    room = _started_room()
+def test_http_provider_generates_and_validates_a_fresh_question_pack(monkeypatch) -> None:
     captured = {}
 
     class Response:
@@ -52,13 +43,21 @@ def test_http_provider_sends_only_curated_round_context(monkeypatch) -> None:
         def read(self, _limit: int) -> bytes:
             return json.dumps(
                 {
-                    "contexts": [
+                    "questions": [
                         {
-                            "round_number": 2,
-                            "question_id": "q2",
-                            "modifier_type": "devils_advocate",
-                            "context": "Consider whether good intentions reduce responsibility.",
+                            "prompt": f"Original debatable statement number {number} for friends.",
+                            "category": f"category_{number}",
+                            "intensity": 2,
+                            "values": ["autonomy", "fairness"],
+                            "modifiers_allowed": ["predict_room", "steelman"],
+                            "discussion_prompt": (
+                                f"Which value changes how you read statement {number}?"
+                            ),
+                            "modifier_context": (
+                                f"Notice the hidden tradeoff inside statement {number}."
+                            ),
                         }
+                        for number in range(1, 7)
                     ]
                 }
             ).encode()
@@ -71,21 +70,91 @@ def test_http_provider_sends_only_curated_round_context(monkeypatch) -> None:
         return Response()
 
     monkeypatch.setattr(ai, "urlopen", fake_urlopen)
-    provider = HttpModifierContextProvider("https://ai.example.test", "shared-secret", 3)
-    contexts = provider.generate(room)
-
-    assert captured["url"] == "https://ai.example.test/v1/modifier-contexts"
-    assert captured["timeout"] == 3
-    assert captured["authorization"] == "Bearer shared-secret"
-    encoded_body = json.dumps(captured["body"])
-    assert "SECR" not in encoded_body
-    assert "Alice" not in encoded_body
-    assert "Bob" not in encoded_body
-    assert len(contexts) == 1
-    apply_modifier_contexts(room, contexts)
-    assert room.rounds[1].modifier.context == (
-        "Consider whether good intentions reduce responsibility."
+    provider = HttpAIProvider("https://ai.example.test", "shared-secret", 20)
+    result = provider.generate_game_content(
+        round_count=6,
+        avoid_questions=tuple(_question(number) for number in range(1, 3)),
     )
+
+    assert captured["url"] == "https://ai.example.test/v1/game-content"
+    assert captured["timeout"] == 20
+    assert captured["authorization"] == "Bearer shared-secret"
+    assert len(result.questions) == 6
+    assert len({question.id for question in result.questions}) == 6
+    assert result.questions[0].discussion_prompt.startswith("Which value")
+
+
+def test_http_provider_rejects_duplicate_generated_questions(monkeypatch) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            question = {
+                "prompt": "The same generated prompt is repeated in this pack.",
+                "category": "ethics",
+                "intensity": 1,
+                "values": ["care", "fairness"],
+                "modifiers_allowed": ["predict_room"],
+                "discussion_prompt": "What principle is in tension here?",
+                "modifier_context": "Consider what each side is trying to protect.",
+            }
+            return json.dumps({"questions": [question, question]}).encode()
+
+    monkeypatch.setattr(ai, "urlopen", lambda *_args, **_kwargs: Response())
+    provider = HttpAIProvider("https://ai.example.test", "secret")
+    with pytest.raises(AIInvalidOutput, match="duplicate"):
+        provider.generate_game_content(round_count=2, avoid_questions=())
+
+
+def test_http_provider_maps_anonymous_verified_recap_facts(monkeypatch) -> None:
+    room = _complete_room()
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps(
+                {
+                    "headline": "P1 and P2 split the room",
+                    "summary": "P1 went high while P2 kept the table grounded.",
+                    "highlights": [
+                        {
+                            "fact_id": fact_id,
+                            "title": f"A fresh title for {fact_id}",
+                            "commentary": "This verified result gave the table its shape.",
+                        }
+                        for fact_id in [
+                            "most_divisive",
+                            "strongest_consensus",
+                            "most_niche",
+                            "most_npc",
+                            "highest_confidence",
+                        ]
+                    ],
+                }
+            ).encode()
+
+    def fake_urlopen(request, **_kwargs):
+        captured["body"] = json.loads(request.data)
+        return Response()
+
+    monkeypatch.setattr(ai, "urlopen", fake_urlopen)
+    recap = HttpAIProvider("https://ai.example.test", "secret").generate_session_recap(room)
+
+    encoded_request = json.dumps(captured["body"])
+    assert "Alice" not in encoded_request
+    assert "Bob" not in encoded_request
+    assert recap.headline == "Alice and Bob split the room"
+    assert recap.highlights[2].value in {"Alice", "Bob"}
 
 
 @pytest.mark.parametrize(
@@ -94,9 +163,9 @@ def test_http_provider_sends_only_curated_round_context(monkeypatch) -> None:
 )
 def test_http_provider_requires_https_except_for_local_development(url: str) -> None:
     with pytest.raises(ValueError):
-        HttpModifierContextProvider(url, "secret")
+        HttpAIProvider(url, "secret")
 
 
 def test_http_provider_accepts_local_http() -> None:
-    provider = HttpModifierContextProvider("http://127.0.0.1:8787", "secret")
+    provider = HttpAIProvider("http://127.0.0.1:8787", "secret")
     assert provider.base_url == "http://127.0.0.1:8787"

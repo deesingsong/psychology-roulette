@@ -10,6 +10,7 @@ interface AuthenticatedRequestInit extends RequestInit {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10000;
+const AI_REQUEST_TIMEOUT_MS = 60000;
 
 export class ApiError extends Error {
   constructor(
@@ -131,6 +132,7 @@ export const api = {
     return request<RoomView>(roomPath(code, "/start"), {
       method: "POST",
       accessToken,
+      requestTimeoutMs: AI_REQUEST_TIMEOUT_MS,
     });
   },
   submitAnswer(
@@ -162,6 +164,7 @@ export const api = {
     return request<RoomView>(roomPath(code, "/advance"), {
       method: "POST",
       accessToken,
+      requestTimeoutMs: AI_REQUEST_TIMEOUT_MS,
     });
   },
   endRoom(code: string, accessToken: string) {

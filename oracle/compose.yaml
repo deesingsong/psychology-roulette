@@ -29,7 +29,8 @@ services:
       GATEWAY_TOKEN: ${GATEWAY_TOKEN:?Set GATEWAY_TOKEN in oracle/.env}
       LLAMA_BASE_URL: http://model:8080
       LLAMA_MODEL: qwen3-0.6b
-      LLAMA_TIMEOUT_SECONDS: "45"
+      LLAMA_TIMEOUT_SECONDS: "60"
+      QWEN_GENERATION_ATTEMPTS: "3"
     depends_on:
       - model
     ports:
