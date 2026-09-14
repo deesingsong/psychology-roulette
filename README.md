@@ -125,7 +125,7 @@ Supabase Postgres data. `vercel.json` contains the service routing, and
    ```text
    PSYCHOLOGY_ROULETTE_DATABASE_URL=<Supabase transaction-pooler URL>
    PSYCHOLOGY_ROULETTE_ROOM_TTL_SECONDS=604800
-   PSYCHOLOGY_ROULETTE_AI_BASE_URL=<Cloudflare Tunnel HTTPS hostname, optional>
+   PSYCHOLOGY_ROULETTE_AI_BASE_URL=<Cloudflare Worker HTTPS URL, optional>
    PSYCHOLOGY_ROULETTE_AI_TOKEN=<Oracle gateway secret, required with AI URL>
    PSYCHOLOGY_ROULETTE_AI_TIMEOUT_SECONDS=12
    ```
@@ -146,8 +146,10 @@ an Oracle IP allowlist.
 
 The Oracle deployment lives in `oracle/`. It runs the official ARM64 llama.cpp server
 with Qwen3 0.6B Q8_0 behind a narrow authenticated gateway. The model has explicit
-CPU and memory limits and is not published on an Oracle ingress port. The optional
-Cloudflare connector reaches the gateway over the private Compose network.
+CPU and memory limits and is not published on an Oracle ingress port. A Cloudflare
+Tunnel makes an outbound-only connection, and the Worker in `cloudflare/worker/`
+reaches that tunnel through a Workers VPC binding. This provides a stable
+`workers.dev` endpoint without requiring a domain or exposing Oracle directly.
 
 ## Production container
 

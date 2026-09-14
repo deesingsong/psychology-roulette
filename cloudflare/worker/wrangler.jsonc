@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "psychology-roulette-ai",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-13",
+  "workers_dev": true,
+  "preview_urls": false,
+  "vpc_networks": [
+    {
+      "binding": "ORACLE_NETWORK",
+      "tunnel_id": "1b6164d8-26b6-48d9-bf3b-b3f4beedbacf",
+      "remote": true
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

@@ -19,10 +19,13 @@ server's existing workload. No Oracle ingress port needs to be opened.
 2. Copy `.env.example` to `.env`, replace both values, and set mode `600`.
 3. Start and test locally with `docker compose up -d model gateway`, then send an
    authenticated request to `http://127.0.0.1:8787/v1/modifier-contexts`.
-4. In Cloudflare Zero Trust, create a named tunnel and route a hostname to
-   `http://gateway:8000`. Put its connector token in `.env`.
+4. Create a remotely managed Cloudflare Tunnel, put its connector token in `.env`,
+   and leave its public-ingress configuration deny-by-default.
 5. Start the connector with `docker compose --profile tunnel up -d`.
-6. Set Vercel's `PSYCHOLOGY_ROULETTE_AI_BASE_URL` to that HTTPS hostname and set
+6. Deploy the Worker in `cloudflare/worker/`. Its Workers VPC binding connects
+   directly to this tunnel and publishes only the gateway's two supported routes on
+   a stable `workers.dev` HTTPS address.
+7. Set Vercel's `PSYCHOLOGY_ROULETTE_AI_BASE_URL` to that Worker URL and set
    `PSYCHOLOGY_ROULETTE_AI_TOKEN` to the same gateway secret.
 
 Never commit `.env`, a tunnel token, or the gateway secret.
