@@ -282,7 +282,7 @@ async def _generate_with_retries(
     attempts = min(max(attempts, 1), 5)
     correction = ""
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for _attempt in range(attempts):
+        for attempt in range(1, attempts + 1):
             model_request = {
                 "model": model,
                 "messages": [
@@ -313,7 +313,18 @@ async def _generate_with_retries(
                 ) from exc
             try:
                 return validator(_extract_json(content))
-            except (ValueError, TypeError, json.JSONDecodeError, ValidationError):
+            except (ValueError, TypeError, json.JSONDecodeError, ValidationError) as exc:
+                print(
+                    json.dumps(
+                        {
+                            "message": "Qwen output rejected by semantic validation",
+                            "attempt": attempt,
+                            "reason": str(exc),
+                        },
+                        separators=(",", ":"),
+                    ),
+                    flush=True,
+                )
                 correction = (
                     " Your prior attempt failed semantic validation. Produce a completely "
                     "new result and obey every count, uniqueness, and allowed-value rule."
