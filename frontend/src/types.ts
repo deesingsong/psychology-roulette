@@ -26,7 +26,6 @@ export interface ModifierView {
   timing: "pre_reveal" | "post_reveal";
   title: string;
   instructions: string;
-  context: string | null;
   target_player_name: string | null;
   source_player_name: string | null;
   options: (number | string)[];
@@ -93,8 +92,14 @@ export interface QuestionView {
   category: string;
   intensity: number;
   values: string[];
-  discussion_prompt: string | null;
 }
+
+export type ContentStatus =
+  | "pending"
+  | "generating"
+  | "ready"
+  | "fallback"
+  | "error";
 
 export interface RevealedAnswer {
   player_name: string;
@@ -105,6 +110,8 @@ export interface RevealedAnswer {
 export interface RoomView {
   code: string;
   phase: RoomPhase;
+  content_status: ContentStatus;
+  content_generation_started_at: number | null;
   players: PlayerView[];
   round_number: number | null;
   round_count: number;

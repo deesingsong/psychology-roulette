@@ -49,9 +49,6 @@ def test_http_provider_generates_and_validates_a_fresh_question_pack(monkeypatch
                             "category": f"category_{number}",
                             "intensity": 2,
                             "values": ["autonomy", "fairness"],
-                            "discussion_prompt": (
-                                f"Which value changes how you read statement {number}?"
-                            ),
                         }
                         for number in range(1, 7)
                     ]
@@ -77,8 +74,6 @@ def test_http_provider_generates_and_validates_a_fresh_question_pack(monkeypatch
     assert captured["authorization"] == "Bearer shared-secret"
     assert len(result.questions) == 6
     assert len({question.id for question in result.questions}) == 6
-    assert result.questions[0].discussion_prompt.startswith("Which value")
-    assert result.questions[0].modifier_context == result.questions[0].discussion_prompt
     assert set(result.questions[0].modifiers_allowed) == {
         "predict_room",
         "secret_principle",
@@ -102,7 +97,6 @@ def test_http_provider_rejects_duplicate_generated_questions(monkeypatch) -> Non
                 "category": "ethics",
                 "intensity": 1,
                 "values": ["care", "fairness"],
-                "discussion_prompt": "What principle is in tension here?",
             }
             return json.dumps({"questions": [question, question]}).encode()
 
@@ -110,6 +104,71 @@ def test_http_provider_rejects_duplicate_generated_questions(monkeypatch) -> Non
     provider = HttpAIProvider("https://ai.example.test", "secret")
     with pytest.raises(AIInvalidOutput, match="duplicate"):
         provider.generate_game_content(round_count=2, avoid_questions=())
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "How should close friends resolve a disagreement about money?",
+        "What matters most when a group makes an important decision?",
+        "Why do people value privacy more than everyday convenience?",
+        "Should close friends disclose every harmless secret they keep? Explain why.",
+    ],
+)
+def test_http_provider_rejects_open_ended_or_mixed_questions(monkeypatch, prompt) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps(
+                {
+                    "questions": [
+                        {
+                            "prompt": prompt,
+                            "category": "relationships",
+                            "intensity": 2,
+                            "values": ["honesty", "care"],
+                        }
+                    ]
+                }
+            ).encode()
+
+    monkeypatch.setattr(ai, "urlopen", lambda *_args, **_kwargs: Response())
+    provider = HttpAIProvider("https://ai.example.test", "secret")
+    with pytest.raises(AIInvalidOutput, match="statement or yes/no"):
+        provider.generate_game_content(round_count=1, avoid_questions=())
+
+
+def test_http_provider_accepts_a_yes_no_question(monkeypatch) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return json.dumps(
+                {
+                    "questions": [
+                        {
+                            "prompt": "Should convenience sometimes matter more than privacy?",
+                            "category": "technology",
+                            "intensity": 2,
+                            "values": ["privacy", "convenience"],
+                        }
+                    ]
+                }
+            ).encode()
+
+    monkeypatch.setattr(ai, "urlopen", lambda *_args, **_kwargs: Response())
+    provider = HttpAIProvider("https://ai.example.test", "secret")
+    result = provider.generate_game_content(round_count=1, avoid_questions=())
+    assert result.questions[0].prompt.startswith("Should")
 
 
 def test_http_provider_maps_anonymous_verified_recap_facts(monkeypatch) -> None:

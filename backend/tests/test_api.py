@@ -416,7 +416,7 @@ def _client_at_second_round(modifier_type: str) -> tuple[TestClient, str, str, s
     return client, code, host_token, guest_token
 
 
-def test_start_uses_fresh_ai_questions_and_attaches_generated_round_copy() -> None:
+def test_prepare_generates_fresh_questions_before_start() -> None:
     store = RoomStore()
 
     class AIProvider:
@@ -432,8 +432,6 @@ def test_start_uses_fresh_ai_questions_and_attaches_generated_round_copy() -> No
                         intensity=1,
                         values=("fairness", "care"),
                         modifiers_allowed=("devils_advocate",) if number == 2 else (),
-                        discussion_prompt=f"Discuss the tension in round {number}.",
-                        modifier_context=f"Explore the hidden tradeoff in round {number}.",
                     )
                     for number in range(1, 7)
                 )
@@ -451,12 +449,16 @@ def test_start_uses_fresh_ai_questions_and_attaches_generated_round_copy() -> No
         room.modifier_seed = "fresh-ai-test"
 
     store.mutate(code, host_token, configure)
+    prepared = client.post(f"/api/rooms/{code}/prepare", headers=_auth(host_token))
+    assert prepared.status_code == 200
+    assert prepared.json()["phase"] == "lobby"
+    assert prepared.json()["content_status"] == "ready"
+
     response = client.post(f"/api/rooms/{code}/start", headers=_auth(host_token))
     assert response.status_code == 200
     assert response.json()["question"]["prompt"] == "Fresh AI question 1 for this exact game."
     saved_modifier = store.get(code).rounds[1].modifier
     assert saved_modifier is not None
-    assert saved_modifier.context == "Explore the hidden tradeoff in round 2."
 
 
 def test_start_falls_back_to_curated_questions_only_when_ai_is_unavailable() -> None:
@@ -471,10 +473,13 @@ def test_start_falls_back_to_curated_questions_only_when_ai_is_unavailable() -> 
         create_app(RoomStore(), ai_provider=FailingProvider())
     )
     code, host, _guest = _create_two_player_room(client)
-    response = client.post(
-        f"/api/rooms/{code}/start",
+    prepared = client.post(
+        f"/api/rooms/{code}/prepare",
         headers=_auth(host["access_token"]),
     )
+    assert prepared.status_code == 200
+    assert prepared.json()["content_status"] == "fallback"
+    response = client.post(f"/api/rooms/{code}/start", headers=_auth(host["access_token"]))
     assert response.status_code == 200
     assert response.json()["phase"] == "answering"
 
@@ -492,11 +497,16 @@ def test_invalid_ai_content_keeps_room_in_lobby_for_retry() -> None:
     client = TestClient(create_app(store, ai_provider=InvalidProvider()))
     code, host, _guest = _create_two_player_room(client)
     response = client.post(
-        f"/api/rooms/{code}/start",
+        f"/api/rooms/{code}/prepare",
         headers=_auth(host["access_token"]),
     )
     assert response.status_code == 503
     assert store.get(code).phase.value == "lobby"
+    assert store.get(code).content_status.value == "error"
+    blocked_start = client.post(
+        f"/api/rooms/{code}/start", headers=_auth(host["access_token"])
+    )
+    assert blocked_start.status_code == 409
 
 
 def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
@@ -521,7 +531,6 @@ def test_predict_room_api_keeps_predictions_private_until_reveal() -> None:
         "instructions": (
             "Before the answers are revealed, predict where the room's average position will land."
         ),
-        "context": None,
         "target_player_name": None,
         "source_player_name": None,
         "options": [-100, -67, -33, 0, 33, 67, 100],
@@ -820,7 +829,6 @@ def test_final_advance_persists_and_returns_ai_recap() -> None:
                         intensity=1,
                         values=("care", "fairness"),
                         modifiers_allowed=(),
-                        discussion_prompt=f"Discuss generated statement {number}.",
                     )
                     for number in range(1, 7)
                 )
@@ -847,6 +855,8 @@ def test_final_advance_persists_and_returns_ai_recap() -> None:
     code, host, guest = _create_two_player_room(client)
     host_token = host["access_token"]
     guest_token = guest["access_token"]
+    prepared = client.post(f"/api/rooms/{code}/prepare", headers=_auth(host_token))
+    assert prepared.status_code == 200
     room = client.post(f"/api/rooms/{code}/start", headers=_auth(host_token)).json()
 
     for _number in range(1, 7):

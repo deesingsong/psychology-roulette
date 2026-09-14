@@ -6,6 +6,7 @@ from typing import Any
 
 from psychology_roulette.domain import (
     Answer,
+    ContentStatus,
     Modifier,
     ModifierResult,
     ModifierSubmission,
@@ -65,8 +66,6 @@ def _question_snapshot(question: Question) -> dict[str, Any]:
         "intensity": question.intensity,
         "values": list(question.values),
         "modifiers_allowed": list(question.modifiers_allowed),
-        "discussion_prompt": question.discussion_prompt,
-        "modifier_context": question.modifier_context,
     }
 
 
@@ -87,16 +86,6 @@ def _question_from_snapshot(value: Any, field: str) -> Question:
                 payload.get("modifiers_allowed"),
                 f"{field}.modifiers_allowed",
             )
-        ),
-        discussion_prompt=(
-            _string(payload["discussion_prompt"], f"{field}.discussion_prompt")
-            if payload.get("discussion_prompt") is not None
-            else None
-        ),
-        modifier_context=(
-            _string(payload["modifier_context"], f"{field}.modifier_context")
-            if payload.get("modifier_context") is not None
-            else None
         ),
     )
 
@@ -161,7 +150,6 @@ def _modifier_snapshot(modifier: Modifier | None) -> dict[str, Any] | None:
         "timing": modifier.timing.value,
         "title": modifier.title,
         "instructions": modifier.instructions,
-        "context": modifier.context,
         "target_player_id": modifier.target_player_id,
         "source_player_id": modifier.source_player_id,
         "options": list(modifier.options),
@@ -244,15 +232,11 @@ def _modifier_from_snapshot(value: Any, field: str) -> Modifier | None:
             movement=movement,
         )
 
-    context_value = payload.get("context")
-    context = None if context_value is None else _string(context_value, f"{field}.context")
-
     return Modifier(
         type=modifier_type,
         timing=timing,
         title=_string(payload.get("title"), f"{field}.title"),
         instructions=_string(payload.get("instructions"), f"{field}.instructions"),
-        context=context,
         target_player_id=target_player_id,
         source_player_id=source_player_id,
         options=options,
@@ -271,6 +255,8 @@ def room_to_snapshot(room: Room) -> dict[str, Any]:
         "modifier_seed": room.modifier_seed,
         "phase": room.phase.value,
         "current_round_index": room.current_round_index,
+        "content_status": room.content_status.value,
+        "content_generation_started_at": room.content_generation_started_at,
         "session_recap": _recap_snapshot(room.session_recap),
         "questions": [_question_snapshot(question) for question in room.questions],
         "players": [
@@ -405,6 +391,16 @@ def room_from_snapshot(value: Any) -> Room:
         if not set(modifier.results).issubset(player_ids):
             raise SnapshotError("A stored modifier result references an unknown player.")
 
+    try:
+        content_status = ContentStatus(
+            _string(payload.get("content_status", "pending"), "room.content_status")
+        )
+    except ValueError as exc:
+        raise SnapshotError("Room snapshot has an unknown content status.") from exc
+    started_value = payload.get("content_generation_started_at")
+    if started_value is not None and type(started_value) not in {int, float}:
+        raise SnapshotError("room.content_generation_started_at must be a number or null.")
+
     return Room(
         code=_string(payload.get("code"), "room.code"),
         questions=questions,
@@ -416,6 +412,10 @@ def room_from_snapshot(value: Any) -> Room:
         rounds=rounds,
         current_round_index=current_round_index,
         session_recap=_recap_from_snapshot(payload.get("session_recap")),
+        content_status=content_status,
+        content_generation_started_at=(
+            float(started_value) if started_value is not None else None
+        ),
     )
 
 

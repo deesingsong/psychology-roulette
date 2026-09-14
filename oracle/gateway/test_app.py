@@ -18,7 +18,6 @@ def _question(number: int) -> dict:
         "category": f"category_{number}",
         "intensity": 2,
         "values": ["autonomy", "fairness"],
-        "discussion_prompt": f"Which principle shapes statement {number} most?",
     }
 
 
@@ -111,6 +110,28 @@ def test_gateway_retries_semantically_invalid_game_content(monkeypatch) -> None:
     assert response.status_code == 200
     assert len(captured) == 2
     assert "prior attempt failed" in captured[1]["messages"][1]["content"]
+
+
+def test_gateway_retries_open_ended_questions(monkeypatch) -> None:
+    monkeypatch.setenv("GATEWAY_TOKEN", "correct-secret")
+    captured: list[dict] = []
+    open_ended = {
+        "questions": [
+            {**_question(number), "prompt": f"How should friends handle topic {number}?"}
+            for number in range(1, 7)
+        ]
+    }
+    valid = {"questions": [_question(number) for number in range(1, 7)]}
+    _install_model(monkeypatch, [open_ended, valid], captured)
+
+    response = TestClient(gateway.app).post(
+        "/v1/game-content",
+        headers={"Authorization": "Bearer correct-secret"},
+        json=_content_request(),
+    )
+
+    assert response.status_code == 200
+    assert len(captured) == 2
 
 
 def test_gateway_returns_422_after_invalid_retry_exhaustion(monkeypatch) -> None:

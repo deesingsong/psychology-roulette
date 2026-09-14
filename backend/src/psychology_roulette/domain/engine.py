@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from .models import (
     Answer,
+    ContentStatus,
     Modifier,
     ModifierResult,
     ModifierSubmission,
@@ -53,6 +54,8 @@ class Room:
     rounds: list[Round] = field(default_factory=list)
     current_round_index: int = -1
     session_recap: SessionRecap | None = None
+    content_status: ContentStatus = ContentStatus.PENDING
+    content_generation_started_at: float | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.modifier_chance <= 1:
@@ -383,8 +386,6 @@ class Room:
         """Plan the session once, using stable random seeds rather than process hash state."""
         for game_round in self.rounds[1:]:
             game_round.modifier = self._select_modifier(game_round, force=False)
-            if game_round.modifier:
-                game_round.modifier.context = game_round.question.modifier_context
 
         if self.modifier_chance > 0 and not any(game_round.modifier for game_round in self.rounds):
             # Keep the opening round simple, but guarantee one modifier later when possible.
@@ -392,7 +393,6 @@ class Room:
                 modifier = self._select_modifier(game_round, force=True)
                 if modifier:
                     game_round.modifier = modifier
-                    modifier.context = game_round.question.modifier_context
                     break
 
     def _select_modifier(self, game_round: Round, *, force: bool) -> Modifier | None:

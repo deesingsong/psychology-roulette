@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 from collections.abc import Callable
 from typing import Annotated, Any, Literal, TypeVar
 
@@ -42,7 +43,20 @@ class GeneratedQuestion(BaseModel):
     category: StrictStr = Field(pattern=r"^[a-z][a-z0-9_]{1,39}$")
     intensity: Literal[1, 2, 3]
     values: list[StrictStr] = Field(min_length=2, max_length=4)
-    discussion_prompt: StrictStr = Field(min_length=12, max_length=240)
+
+
+YES_NO_STARTERS = frozenset(
+    {
+        "are", "can", "could", "did", "do", "does", "has", "have", "is",
+        "may", "might", "must", "ought", "should", "was", "were", "will", "would",
+    }
+)
+OPEN_ENDED_STARTERS = frozenset(
+    {
+        "describe", "explain", "how", "identify", "list", "name", "rank", "what",
+        "when", "where", "which", "who", "whom", "whose", "why",
+    }
+)
 
 
 class GameContentResponse(BaseModel):
@@ -107,14 +121,18 @@ def require_gateway_token(
 def _game_content_prompt(request: GameContentRequest) -> str:
     return (
         "/no_think. Create a fresh party-game pack with exactly "
-        f"{request.round_count} original statements. Players rate agreement from -100 "
-        "to +100. Every prompt must be debatable, understandable without specialist "
+        f"{request.round_count} original prompts. Players respond on a scale from strongly "
+        "disagree to strongly agree. Prefer a concise declarative claim, such as 'Privacy "
+        "matters more than convenience.' A question is allowed only when it has a yes/no "
+        "answer and begins with an auxiliary such as should, is, are, can, could, would, do, "
+        "does, will, must, has, or have. Never begin with how, what, why, who, when, where, "
+        "which, explain, describe, identify, name, list, or rank. Every prompt must be "
+        "debatable, understandable without specialist "
         "knowledge, non-diagnostic, and meaningfully different from the others. Use at "
         "several categories across the pack. Avoid trivia, personal-data requests, "
-        "graphic harm, targeted politics, and a plainly correct answer. A discussion_prompt "
-        "is one concise question that opens the value tension and can also serve as a "
-        "surprise-round angle; it must not invent rules, targets, or scores. Values are 2-4 "
-        "lowercase snake_case principles. Return only the required JSON object. Do not "
+        "graphic harm, targeted politics, and a plainly correct answer. Values are 2-4 "
+        "lowercase snake_case principles. Do not generate discussion questions, angles, "
+        "explanations, or any fields outside the schema. Return only the required JSON object. Do not "
         "repeat these "
         "existing prompts: "
         + json.dumps(request.avoid_prompts, ensure_ascii=False, separators=(",", ":"))
@@ -148,18 +166,12 @@ def _game_content_schema(count: int) -> dict[str, Any]:
                                 "pattern": "^[a-z][a-z0-9_]{1,39}$",
                             },
                         },
-                        "discussion_prompt": {
-                            "type": "string",
-                            "minLength": 12,
-                            "maxLength": 240,
-                        },
                     },
                     "required": [
                         "prompt",
                         "category",
                         "intensity",
                         "values",
-                        "discussion_prompt",
                     ],
                     "additionalProperties": False,
                 },
@@ -234,15 +246,29 @@ def _validate_game_content(payload: Any, request: GameContentRequest) -> GameCon
     avoided = {" ".join(item.split()).casefold() for item in request.avoid_prompts}
     if len(prompts) != request.round_count or prompts & avoided:
         raise ValueError("Question pack contained a duplicate prompt.")
-    discussions = {
-        " ".join(item.discussion_prompt.split()).casefold() for item in generated.questions
-    }
-    if len(discussions) != request.round_count:
-        raise ValueError("Question pack contained duplicate discussion prompts.")
     for item in generated.questions:
+        if not _prompt_supports_agreement_scale(item.prompt):
+            raise ValueError("A prompt was not a statement or yes/no question.")
         if len(set(item.values)) != len(item.values):
             raise ValueError("Question values must be unique.")
     return generated
+
+
+def _prompt_supports_agreement_scale(prompt: str) -> bool:
+    match = re.match(r"[A-Za-z]+", prompt)
+    if match is None:
+        return False
+    first_word = match.group(0).casefold()
+    if first_word in OPEN_ENDED_STARTERS:
+        return False
+    question_marks = prompt.count("?")
+    if question_marks:
+        return (
+            question_marks == 1
+            and prompt.endswith("?")
+            and first_word in YES_NO_STARTERS
+        )
+    return True
 
 
 def _validate_recap(
@@ -347,13 +373,13 @@ async def game_content(
 ) -> GameContentResponse:
     return await _generate_with_retries(
         system=(
-            "You design fresh, safe, high-replay-value discussion content for the party "
+            "You design fresh, safe, high-replay-value agreement prompts for the party "
             "game Are You Niche or NPC?. Follow the JSON schema exactly."
         ),
         prompt=_game_content_prompt(request),
         schema=_game_content_schema(request.round_count),
         validator=lambda payload: _validate_game_content(payload, request),
-        max_tokens=750,
+        max_tokens=520,
         temperature=0.95,
     )
 

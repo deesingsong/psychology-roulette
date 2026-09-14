@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Annotated
@@ -21,6 +22,7 @@ from psychology_roulette.ai import (
     configured_ai_provider,
 )
 from psychology_roulette.domain import (
+    ContentStatus,
     GameError,
     ModifierTiming,
     ModifierType,
@@ -90,7 +92,6 @@ class QuestionView(BaseModel):
     category: str
     intensity: int
     values: list[str]
-    discussion_prompt: str | None
 
 
 class RevealedAnswerView(BaseModel):
@@ -111,7 +112,6 @@ class ModifierView(BaseModel):
     timing: ModifierTiming
     title: str
     instructions: str
-    context: str | None
     target_player_name: str | None
     source_player_name: str | None
     options: list[int | str]
@@ -168,6 +168,8 @@ class SessionRecapView(BaseModel):
 class RoomView(BaseModel):
     code: str
     phase: RoomPhase
+    content_status: ContentStatus
+    content_generation_started_at: float | None
     players: list[PlayerView]
     round_number: int | None
     round_count: int
@@ -259,7 +261,6 @@ def room_view(room: Room) -> RoomView:
             category=current_round.question.category,
             intensity=current_round.question.intensity,
             values=list(current_round.question.values),
-            discussion_prompt=current_round.question.discussion_prompt,
         )
 
     modifier_view = None
@@ -297,7 +298,6 @@ def room_view(room: Room) -> RoomView:
             timing=modifier.timing,
             title=modifier.title,
             instructions=modifier.instructions,
-            context=modifier.context,
             target_player_name=(
                 room.players[modifier.target_player_id].name
                 if modifier.target_player_id is not None
@@ -369,6 +369,8 @@ def room_view(room: Room) -> RoomView:
     return RoomView(
         code=room.code,
         phase=room.phase,
+        content_status=room.content_status,
+        content_generation_started_at=room.content_generation_started_at,
         players=[
             PlayerView(
                 name=player.name,
@@ -393,8 +395,57 @@ def room_view(room: Room) -> RoomView:
     )
 
 
-def _start_with_content(room: Room, player_id: str, content: GameContent) -> None:
-    room.questions = list(content.questions)
+CONTENT_GENERATION_STALE_SECONDS = 90
+
+
+def _begin_content_generation(room: Room, player_id: str, started_at: float) -> None:
+    player = room.players.get(player_id)
+    if not player or not player.is_host:
+        raise GameError("Only the host can do that.")
+    if room.phase is not RoomPhase.LOBBY:
+        raise GameError("This game has already started.")
+    if room.content_status in {ContentStatus.READY, ContentStatus.FALLBACK}:
+        return
+    if (
+        room.content_status is ContentStatus.GENERATING
+        and room.content_generation_started_at is not None
+        and started_at - room.content_generation_started_at
+        < CONTENT_GENERATION_STALE_SECONDS
+    ):
+        return
+    room.content_status = ContentStatus.GENERATING
+    room.content_generation_started_at = started_at
+
+
+def _finish_content_generation(
+    room: Room,
+    player_id: str,
+    started_at: float,
+    status: ContentStatus,
+    content: GameContent | None = None,
+) -> None:
+    player = room.players.get(player_id)
+    if not player or not player.is_host:
+        raise GameError("Only the host can do that.")
+    if (
+        room.phase is not RoomPhase.LOBBY
+        or room.content_status is not ContentStatus.GENERATING
+        or room.content_generation_started_at != started_at
+    ):
+        return
+    if content is not None:
+        room.questions = list(content.questions)
+    room.content_status = status
+    room.content_generation_started_at = None
+
+
+def _start_prepared_room(room: Room, player_id: str, *, ai_enabled: bool) -> None:
+    if room.content_status is ContentStatus.PENDING and not ai_enabled:
+        room.content_status = ContentStatus.FALLBACK
+    if room.content_status not in {ContentStatus.READY, ContentStatus.FALLBACK}:
+        if room.content_status is ContentStatus.ERROR:
+            raise GameError("Question preparation failed. Retry it before starting.")
+        raise GameError("The questions are still being prepared.")
     room.start(host_id=player_id)
 
 
@@ -558,30 +609,87 @@ def create_app(
 
     @app.post("/api/rooms/{code}/start", response_model=RoomView)
     def start_room(code: str, access_token: AccessToken) -> RoomView:
-        room, player = active_store.read(code, access_token)
-        if not player.is_host:
-            raise GameError("Only the host can do that.")
-        if active_ai_provider is not None:
-            try:
-                content = active_ai_provider.generate_game_content(
-                    round_count=6,
-                    avoid_questions=tuple(room.questions),
-                )
-            except AIServiceUnavailable:
-                logger.exception("Qwen is unavailable; starting with curated questions.")
-            else:
-                room = active_store.mutate(
-                    code,
-                    access_token,
-                    lambda active_room, player_id: _start_with_content(
-                        active_room, player_id, content
-                    ),
-                )
-                return room_view(room)
         room = active_store.mutate(
             code,
             access_token,
-            lambda active_room, player_id: active_room.start(host_id=player_id),
+            lambda active_room, player_id: _start_prepared_room(
+                active_room,
+                player_id,
+                ai_enabled=active_ai_provider is not None,
+            ),
+        )
+        return room_view(room)
+
+    @app.post("/api/rooms/{code}/prepare", response_model=RoomView)
+    def prepare_room(code: str, access_token: AccessToken) -> RoomView:
+        started_at = time.time()
+        room = active_store.mutate(
+            code,
+            access_token,
+            lambda active_room, player_id: _begin_content_generation(
+                active_room, player_id, started_at
+            ),
+        )
+        if (
+            room.content_status is not ContentStatus.GENERATING
+            or room.content_generation_started_at != started_at
+        ):
+            return room_view(room)
+
+        if active_ai_provider is None:
+            room = active_store.mutate(
+                code,
+                access_token,
+                lambda active_room, player_id: _finish_content_generation(
+                    active_room,
+                    player_id,
+                    started_at,
+                    ContentStatus.FALLBACK,
+                ),
+            )
+            return room_view(room)
+
+        try:
+            content = active_ai_provider.generate_game_content(
+                round_count=6,
+                avoid_questions=tuple(room.questions),
+            )
+        except AIServiceUnavailable:
+            logger.exception("Qwen is unavailable; keeping the curated question pack.")
+            room = active_store.mutate(
+                code,
+                access_token,
+                lambda active_room, player_id: _finish_content_generation(
+                    active_room,
+                    player_id,
+                    started_at,
+                    ContentStatus.FALLBACK,
+                ),
+            )
+            return room_view(room)
+        except AIInvalidOutput:
+            active_store.mutate(
+                code,
+                access_token,
+                lambda active_room, player_id: _finish_content_generation(
+                    active_room,
+                    player_id,
+                    started_at,
+                    ContentStatus.ERROR,
+                ),
+            )
+            raise
+
+        room = active_store.mutate(
+            code,
+            access_token,
+            lambda active_room, player_id: _finish_content_generation(
+                active_room,
+                player_id,
+                started_at,
+                ContentStatus.READY,
+                content,
+            ),
         )
         return room_view(room)
 

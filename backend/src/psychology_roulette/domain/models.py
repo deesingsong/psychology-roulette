@@ -14,6 +14,14 @@ class RoomPhase(StrEnum):
     COMPLETE = "complete"
 
 
+class ContentStatus(StrEnum):
+    PENDING = "pending"
+    GENERATING = "generating"
+    READY = "ready"
+    FALLBACK = "fallback"
+    ERROR = "error"
+
+
 class ModifierType(StrEnum):
     PREDICT_ROOM = "predict_room"
     SECRET_PRINCIPLE = "secret_principle"
@@ -35,8 +43,6 @@ class Question:
     intensity: int
     values: tuple[str, ...]
     modifiers_allowed: tuple[str, ...]
-    discussion_prompt: str | None = None
-    modifier_context: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +79,6 @@ class Modifier:
     timing: ModifierTiming
     title: str
     instructions: str
-    context: str | None = None
     target_player_id: str | None = None
     source_player_id: str | None = None
     options: tuple[int | str, ...] = ()

@@ -132,6 +132,12 @@ export const api = {
     return request<RoomView>(roomPath(code, "/start"), {
       method: "POST",
       accessToken,
+    });
+  },
+  prepareRoom(code: string, accessToken: string) {
+    return request<RoomView>(roomPath(code, "/prepare"), {
+      method: "POST",
+      accessToken,
       requestTimeoutMs: AI_REQUEST_TIMEOUT_MS,
     });
   },

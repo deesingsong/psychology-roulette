@@ -610,24 +610,6 @@ footer {
   margin: 8px 0 0;
   font: 600 1rem/1.5 "Manrope";
 }
-.modifier-context {
-  margin: 18px 0 4px;
-  padding: 15px 17px;
-  border: 1px solid rgba(156, 124, 255, 0.28);
-  border-radius: 13px;
-  background: rgba(156, 124, 255, 0.08);
-}
-.modifier-context span {
-  color: #c4b2ff;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-}
-.modifier-context p {
-  margin: 7px 0 0;
-  color: var(--ink);
-  font: 600 0.95rem/1.55 "Manrope";
-}
 .principle-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -762,21 +744,64 @@ footer {
 .movement-grid span {
   text-transform: none;
 }
-.discussion-card {
-  margin: 16px 0;
+.generation-status {
+  margin: 18px 0;
   padding: 22px;
-  border-left: 3px solid var(--violet);
+  border: 1px solid rgba(156, 124, 255, 0.3);
+  border-radius: 16px;
   background: rgba(156, 124, 255, 0.08);
 }
-.discussion-card span {
-  color: var(--violet);
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+.generation-status h2 {
+  margin: 7px 0;
+  font-size: clamp(1.15rem, 3vw, 1.5rem);
 }
-.discussion-card p {
-  margin: 10px 0 0;
-  font: 600 1.05rem/1.5 "Manrope";
+.generation-status > p:not(.eyebrow) {
+  margin: 0;
+  color: var(--muted);
+}
+.generation-progress {
+  height: 10px;
+  margin-top: 18px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+}
+.generation-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--violet), var(--coral));
+  transition: width 500ms ease;
+}
+.generation-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 9px;
+  color: var(--muted);
+  font: 600 0.72rem/1.4 "Manrope";
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.generation-status .button {
+  margin-top: 18px;
+}
+.error-generation {
+  border-color: rgba(255, 116, 103, 0.42);
+  background: rgba(255, 116, 103, 0.08);
+}
+.content-ready {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 18px 0;
+  color: var(--muted);
+  text-align: center;
+}
+.content-ready span {
+  color: var(--mint);
+  font-size: 1.15rem;
 }
 .complete-stage {
   text-align: center;

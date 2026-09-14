@@ -22,6 +22,8 @@ const POSITIONS = [
 const SESSION_STORAGE_VERSION = 1;
 const SESSION_KEY = "psychology-roulette-session-v1";
 const LEGACY_SESSION_KEY = "psychology-roulette-session";
+const QUESTION_GENERATION_ESTIMATE_SECONDS = 30;
+const RECAP_GENERATION_ESTIMATE_SECONDS = 25;
 
 interface StoredSession {
   version: typeof SESSION_STORAGE_VERSION;
@@ -110,6 +112,16 @@ function isAbortError(reason: unknown) {
 
 function errorMessage(reason: unknown, fallback: string) {
   return reason instanceof Error ? reason.message : fallback;
+}
+
+function willCompleteOnAdvance(room: RoomView) {
+  if (room.round_number !== room.round_count) return false;
+  if (room.phase === "follow_up_reveal") return true;
+  return (
+    room.phase === "reveal" &&
+    room.modifier?.type !== "steelman" &&
+    room.modifier?.type !== "change_my_mind"
+  );
 }
 
 async function copyText(value: string) {
@@ -644,30 +656,79 @@ function Game({
   onLeave,
 }: GameProps) {
   const [pending, setPending] = useState(false);
+  const [recapStartedAt, setRecapStartedAt] = useState<number | null>(null);
   const pendingRef = useRef(false);
+  const preparationAttemptRef = useRef<string | null>(null);
 
-  const act = async (request: () => Promise<RoomView>) => {
-    if (pendingRef.current) return;
-    pendingRef.current = true;
-    setPending(true);
-    onClearActionError();
-    const accessToken = session.accessToken;
-    const generation = onActionStart(accessToken);
-    if (generation === null) {
-      pendingRef.current = false;
-      setPending(false);
+  const act = useCallback(
+    async (
+      request: () => Promise<RoomView>,
+      options: {
+        optimisticRoom?: RoomView;
+        tracksRecap?: boolean;
+      } = {},
+    ) => {
+      if (pendingRef.current) return;
+      pendingRef.current = true;
+      setPending(true);
+      if (options.tracksRecap) setRecapStartedAt(Date.now() / 1000);
+      onClearActionError();
+      const accessToken = session.accessToken;
+      const generation = onActionStart(accessToken);
+      if (generation === null) {
+        pendingRef.current = false;
+        setPending(false);
+        setRecapStartedAt(null);
+        return;
+      }
+      if (options.optimisticRoom) {
+        onActionRoom(options.optimisticRoom, accessToken, generation);
+      }
+      try {
+        onActionRoom(await request(), accessToken, generation);
+      } catch (reason) {
+        onActionError(reason, accessToken, generation);
+      } finally {
+        onActionEnd(accessToken, generation);
+        pendingRef.current = false;
+        setPending(false);
+        if (options.tracksRecap) setRecapStartedAt(null);
+      }
+    },
+    [
+      onActionEnd,
+      onActionError,
+      onActionRoom,
+      onActionStart,
+      onClearActionError,
+      session.accessToken,
+    ],
+  );
+
+  const prepareQuestions = useCallback(() => {
+    const optimisticRoom: RoomView = {
+      ...room,
+      content_status: "generating",
+      content_generation_started_at: Date.now() / 1000,
+    };
+    return act(
+      () => api.prepareRoom(room.code, session.accessToken),
+      { optimisticRoom },
+    );
+  }, [act, room, session.accessToken]);
+
+  useEffect(() => {
+    if (
+      !session.isHost ||
+      room.phase !== "lobby" ||
+      room.content_status !== "pending" ||
+      preparationAttemptRef.current === room.code
+    ) {
       return;
     }
-    try {
-      onActionRoom(await request(), accessToken, generation);
-    } catch (reason) {
-      onActionError(reason, accessToken, generation);
-    } finally {
-      onActionEnd(accessToken, generation);
-      pendingRef.current = false;
-      setPending(false);
-    }
-  };
+    preparationAttemptRef.current = room.code;
+    void prepareQuestions();
+  }, [prepareQuestions, room.code, room.content_status, room.phase, session.isHost]);
 
   const endGame = async () => {
     if (
@@ -738,11 +799,22 @@ function Game({
         </div>
       )}
 
+      {recapStartedAt !== null && (
+        <EstimatedProgress
+          startedAt={recapStartedAt}
+          estimateSeconds={RECAP_GENERATION_ESTIMATE_SECONDS}
+          eyebrow="BUILDING THE FINAL TABLE"
+          title="Qwen is finding the night's best moments."
+          detail="Checking the verified scores and choosing the most interesting stats."
+        />
+      )}
+
       {room.phase === "lobby" && (
         <Lobby
           room={room}
           isHost={session.isHost}
           pending={pending}
+          onPrepare={() => void prepareQuestions()}
           onStart={() =>
             act(() => api.startRoom(room.code, session.accessToken))
           }
@@ -785,7 +857,9 @@ function Game({
           isHost={session.isHost}
           pending={pending}
           onAdvance={() =>
-            act(() => api.advance(room.code, session.accessToken))
+            act(() => api.advance(room.code, session.accessToken), {
+              tracksRecap: willCompleteOnAdvance(room),
+            })
           }
         />
       )}
@@ -809,7 +883,9 @@ function Game({
           isHost={session.isHost}
           pending={pending}
           onAdvance={() =>
-            act(() => api.advance(room.code, session.accessToken))
+            act(() => api.advance(room.code, session.accessToken), {
+              tracksRecap: willCompleteOnAdvance(room),
+            })
           }
         />
       )}
@@ -834,13 +910,16 @@ function Lobby({
   room,
   isHost,
   pending,
+  onPrepare,
   onStart,
 }: {
   room: RoomView;
   isHost: boolean;
   pending: boolean;
+  onPrepare: () => void;
   onStart: () => void;
 }) {
+  const contentReady = ["ready", "fallback"].includes(room.content_status);
   return (
     <section className="stage lobby-stage">
       <div>
@@ -868,18 +947,101 @@ function Lobby({
           ),
         )}
       </div>
+      {room.content_status === "error" ? (
+        <div className="generation-status error-generation" role="alert">
+          <p className="eyebrow">QUESTION PREPARATION PAUSED</p>
+          <h2>Qwen did not return a usable set.</h2>
+          <p>No invalid questions were saved. The host can safely try again.</p>
+          {isHost && (
+            <button className="button secondary" disabled={pending} onClick={onPrepare}>
+              Retry preparation
+            </button>
+          )}
+        </div>
+      ) : room.content_status === "pending" || room.content_status === "generating" ? (
+        <EstimatedProgress
+          startedAt={room.content_generation_started_at}
+          estimateSeconds={QUESTION_GENERATION_ESTIMATE_SECONDS}
+          eyebrow="PREPARING SIX FRESH PROMPTS"
+          title="Qwen is setting the table."
+          detail="You can keep inviting players while the question pack is generated."
+          onRetry={isHost ? onPrepare : undefined}
+        />
+      ) : (
+        <p className="content-ready" role="status">
+          <span>✓</span> Six questions are ready. Starting will be immediate.
+        </p>
+      )}
       {isHost ? (
         <button
           className="button primary wide"
-          disabled={room.players.length < 2 || pending}
+          disabled={room.players.length < 2 || pending || !contentReady}
           onClick={onStart}
         >
-          Begin the game
+          {contentReady ? "Begin the game" : "Preparing questions…"}
         </button>
       ) : (
         <p className="waiting-note">
           The host will begin when everyone is ready.
         </p>
+      )}
+    </section>
+  );
+}
+
+function EstimatedProgress({
+  startedAt,
+  estimateSeconds,
+  eyebrow,
+  title,
+  detail,
+  onRetry,
+}: {
+  startedAt: number | null;
+  estimateSeconds: number;
+  eyebrow: string;
+  title: string;
+  detail: string;
+  onRetry?: () => void;
+}) {
+  const [now, setNow] = useState(() => Date.now() / 1000);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now() / 1000), 500);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const elapsed = startedAt === null ? 0 : Math.max(0, now - startedAt);
+  const progress = Math.min(
+    92,
+    Math.round(6 + (elapsed / estimateSeconds) * 86),
+  );
+  const remaining = Math.max(0, Math.ceil(estimateSeconds - elapsed));
+  const canRetry = Boolean(onRetry && elapsed >= 90);
+
+  return (
+    <section className="generation-status" aria-live="polite">
+      <p className="eyebrow">{eyebrow}</p>
+      <h2>{title}</h2>
+      <p>{detail}</p>
+      <div
+        className="generation-progress"
+        role="progressbar"
+        aria-label="Estimated generation progress"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress}
+      >
+        <span style={{ width: `${progress}%` }} />
+      </div>
+      <div className="generation-meta">
+        <span>{progress}% estimated</span>
+        <span>{remaining > 0 ? `About ${remaining}s remaining` : "Finishing up…"}</span>
+      </div>
+      {canRetry && (
+        <button className="button secondary" onClick={onRetry}>
+          Retry preparation
+        </button>
       )}
     </section>
   );
@@ -1048,7 +1210,6 @@ function ModifierStage({
         <p className="eyebrow">ROUND {room.round_number}</p>
         <h1>{modifier.title}</h1>
         <p className="lede">{modifier.instructions}</p>
-        <ModifierContext context={modifier.context} />
       </div>
       <div className="modifier-question">
         <span>THE QUESTION</span>
@@ -1194,7 +1355,6 @@ function FollowUpStage({
         <p className="eyebrow">ROUND {room.round_number}</p>
         <h1>{modifier.title}</h1>
         <p className="lede">{modifier.instructions}</p>
-        <ModifierContext context={modifier.context} />
       </div>
 
       {modifier.type === "steelman" && (
@@ -1368,15 +1528,6 @@ function Reveal({
           <strong>{room.summary?.average_confidence ?? 0}%</strong>
         </article>
       </div>
-      {!isFollowUpReveal && (
-        <div className="discussion-card">
-          <span>DISCUSSION PROMPT</span>
-          <p>
-            {room.question?.discussion_prompt ??
-              "Who is furthest from the room—and what value is their answer protecting?"}
-          </p>
-        </div>
-      )}
       {isHost ? (
         <button
           className="button primary wide"
@@ -1394,16 +1545,6 @@ function Reveal({
   );
 }
 
-function ModifierContext({ context }: { context: string | null }) {
-  if (!context) return null;
-  return (
-    <aside className="modifier-context">
-      <span>AI DISCUSSION ANGLE</span>
-      <p>{context}</p>
-    </aside>
-  );
-}
-
 function RevealModifierCard({ room }: { room: RoomView }) {
   const modifier = room.modifier;
   if (!modifier) return null;
@@ -1414,7 +1555,6 @@ function RevealModifierCard({ room }: { room: RoomView }) {
         <span className="modifier-badge">DEVIL'S ADVOCATE</span>
         <h2>{modifier.target_player_name}, the wheel chose you.</h2>
         <p>{modifier.instructions}</p>
-        <ModifierContext context={modifier.context} />
       </article>
     );
   }
@@ -1444,7 +1584,6 @@ function RevealModifierCard({ room }: { room: RoomView }) {
             </p>
           </>
         )}
-        <ModifierContext context={modifier.context} />
       </article>
     );
   }
@@ -1459,7 +1598,6 @@ function RevealModifierCard({ room }: { room: RoomView }) {
             Everyone will privately choose again after the discussion. Movement
             is information, not a score.
           </p>
-          <ModifierContext context={modifier.context} />
         </article>
       );
     }
@@ -1500,7 +1638,6 @@ function RevealModifierCard({ room }: { room: RoomView }) {
           ? "Who read the room?"
           : "What mattered underneath?"}
       </h2>
-      <ModifierContext context={modifier.context} />
       <div className="modifier-result-grid">
         {(modifier.results ?? []).map((result) => (
           <div key={result.player_name}>

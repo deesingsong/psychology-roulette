@@ -23,6 +23,47 @@ MAX_QUESTION_LENGTH = 320
 MAX_COPY_LENGTH = 240
 SUPPORTED_MODIFIERS = tuple(item.value for item in ModifierType)
 VALUE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
+YES_NO_STARTERS = frozenset(
+    {
+        "are",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "has",
+        "have",
+        "is",
+        "may",
+        "might",
+        "must",
+        "ought",
+        "should",
+        "was",
+        "were",
+        "will",
+        "would",
+    }
+)
+OPEN_ENDED_STARTERS = frozenset(
+    {
+        "describe",
+        "explain",
+        "how",
+        "identify",
+        "list",
+        "name",
+        "rank",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "why",
+    }
+)
 
 
 class AIServiceUnavailable(RuntimeError):
@@ -101,6 +142,11 @@ class HttpAIProvider:
             if not isinstance(raw, dict):
                 raise AIInvalidOutput("The AI service returned an invalid question.")
             prompt = _clean_text(raw.get("prompt"), MAX_QUESTION_LENGTH, minimum=20)
+            if not prompt_supports_agreement_scale(prompt):
+                raise AIInvalidOutput(
+                    "The AI service returned a prompt that is not a statement or "
+                    "yes/no question."
+                )
             folded_prompt = prompt.casefold()
             if folded_prompt in prompts or folded_prompt in avoided:
                 raise AIInvalidOutput("The AI service returned a duplicate question.")
@@ -111,9 +157,6 @@ class HttpAIProvider:
             if type(intensity) is not int or intensity not in {1, 2, 3}:
                 raise AIInvalidOutput("The AI service returned an invalid intensity.")
             values = _unique_slugs(raw.get("values"), "values", minimum=2, maximum=4)
-            discussion_prompt = _clean_text(
-                raw.get("discussion_prompt"), MAX_COPY_LENGTH, minimum=12
-            )
             questions.append(
                 Question(
                     id=f"ai_{pack_id}_{index}",
@@ -122,8 +165,6 @@ class HttpAIProvider:
                     intensity=intensity,
                     values=values,
                     modifiers_allowed=SUPPORTED_MODIFIERS,
-                    discussion_prompt=discussion_prompt,
-                    modifier_context=discussion_prompt,
                 )
             )
         return GameContent(questions=tuple(questions))
@@ -346,6 +387,24 @@ def _clean_text(value: Any, maximum: int, *, minimum: int = 1) -> str:
     if not minimum <= len(cleaned) <= maximum:
         raise AIInvalidOutput("The AI service returned text of an invalid length.")
     return cleaned
+
+
+def prompt_supports_agreement_scale(prompt: str) -> bool:
+    """Accept declarative claims or single yes/no questions, never open prompts."""
+    match = re.match(r"[A-Za-z]+", prompt)
+    if match is None:
+        return False
+    first_word = match.group(0).casefold()
+    if first_word in OPEN_ENDED_STARTERS:
+        return False
+    question_marks = prompt.count("?")
+    if question_marks:
+        return (
+            question_marks == 1
+            and prompt.endswith("?")
+            and first_word in YES_NO_STARTERS
+        )
+    return True
 
 
 def _slug(value: Any, field: str) -> str:
