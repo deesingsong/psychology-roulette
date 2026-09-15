@@ -408,6 +408,22 @@ class Room:
         if not force and rng.random() >= self.modifier_chance:
             return None
 
+        usage = {
+            modifier_type: sum(
+                1
+                for planned_round in self.rounds
+                if planned_round.number < game_round.number
+                and planned_round.modifier is not None
+                and planned_round.modifier.type is modifier_type
+            )
+            for modifier_type in allowed
+        }
+        lowest_usage = min(usage.values())
+        allowed = tuple(
+            modifier_type
+            for modifier_type in allowed
+            if usage[modifier_type] == lowest_usage
+        )
         modifier_type = rng.choice(allowed)
         if modifier_type is ModifierType.PREDICT_ROOM:
             return Modifier(

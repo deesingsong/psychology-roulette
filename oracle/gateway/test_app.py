@@ -17,8 +17,8 @@ def _question(number: int) -> dict:
     prompts = (
         "Daily routines should leave room for unplanned choices.",
         "Friendship matters more than avoiding every disagreement.",
-        "Technology should prioritize privacy over convenience.",
-        "Fairness sometimes requires treating people differently.",
+        "Technology should prioritize personal privacy over everyday convenience.",
+        "Fairness sometimes requires treating people differently in difficult cases.",
         "Community needs should sometimes outweigh personal convenience.",
         "Responsibility matters even when intentions were good.",
     )
@@ -31,15 +31,7 @@ def _question(number: int) -> dict:
 
 
 def _prompt_payloads(count: int = 6) -> list[dict]:
-    completions = (
-        "leave room for unplanned choices",
-        "matter more than avoiding every disagreement",
-        "prioritize privacy over convenience",
-        "sometimes require treating people differently",
-        "put shared needs above personal convenience",
-        "matter even when intentions were good",
-    )
-    return [{"completion": completions[number - 1]} for number in range(1, count + 1)]
+    return [{"prompt": _question(number)["prompt"]} for number in range(1, count + 1)]
 
 
 def _recap_request() -> dict:
@@ -112,8 +104,8 @@ def test_gateway_returns_schema_constrained_game_content(monkeypatch) -> None:
     assert len(response.json()["questions"]) == 6
     assert len(captured) == 6
     schema = captured[0]["response_format"]["schema"]
-    assert schema["required"] == ["completion"]
-    assert set(schema["properties"]) == {"completion"}
+    assert schema["required"] == ["prompt"]
+    assert set(schema["properties"]) == {"prompt"}
     assert response.json()["questions"][0]["category"] == "everyday_life"
 
 
@@ -131,14 +123,14 @@ def test_gateway_retries_a_semantically_invalid_question(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert len(captured) == 7
-    assert "prior attempt failed" in captured[1]["messages"][1]["content"]
+    assert "Try a different" in captured[1]["messages"][1]["content"]
     assert len({item["messages"][1]["content"] for item in captured[1:]}) == 6
 
 
 def test_gateway_retries_open_ended_questions(monkeypatch) -> None:
     monkeypatch.setenv("GATEWAY_TOKEN", "correct-secret")
     captured: list[dict] = []
-    open_ended = {"completion": "ask what friends should value most?"}
+    open_ended = {"prompt": "What should close friends value most during disagreements?"}
     _install_model(monkeypatch, [open_ended, *_prompt_payloads()], captured)
 
     response = TestClient(gateway.app).post(
@@ -155,7 +147,7 @@ def test_gateway_returns_422_after_invalid_retry_exhaustion(monkeypatch) -> None
     monkeypatch.setenv("GATEWAY_TOKEN", "correct-secret")
     monkeypatch.setenv("QWEN_GENERATION_ATTEMPTS", "2")
     captured: list[dict] = []
-    invalid = {"completion": "ask why this matters?"}
+    invalid = {"prompt": "Why should close friends value honesty during disagreements?"}
     _install_model(monkeypatch, [invalid, invalid], captured)
 
     response = TestClient(gateway.app).post(
@@ -166,6 +158,27 @@ def test_gateway_returns_422_after_invalid_retry_exhaustion(monkeypatch) -> None
 
     assert response.status_code == 422
     assert len(captured) == 2
+
+
+def test_gateway_rejects_obvious_grammar_and_tautology_failures() -> None:
+    assert gateway._prompt_has_obvious_quality_issue(
+        "Personal responsibility should be a responsible person."
+    )
+    assert gateway._prompt_has_obvious_quality_issue(
+        "Every community should builds stronger community ties through shared values and experiences."
+    )
+    assert gateway._prompt_has_obvious_quality_issue(
+        "Strongly agree: Relationships should prioritize trust over control and respect over dominance."
+    )
+    assert gateway._prompt_has_obvious_quality_issue(
+        "Personal responsibility requires individuals to accept accountability for every action."
+    )
+    assert gateway._prompt_has_obvious_quality_issue(
+        "Planning is a powerful tool that can make daily life more efficient and enjoyable by anticipating challenges and optimizing every available resource."
+    )
+    assert not gateway._prompt_has_obvious_quality_issue(
+        "Technology should prioritize personal privacy over everyday convenience."
+    )
 
 
 def test_gateway_curates_recap_only_from_verified_fact_ids(monkeypatch) -> None:

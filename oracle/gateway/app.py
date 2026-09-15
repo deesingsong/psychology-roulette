@@ -45,14 +45,10 @@ class GeneratedQuestion(BaseModel):
     values: list[StrictStr] = Field(min_length=2, max_length=4)
 
 
-class GeneratedCompletion(BaseModel):
+class GeneratedPrompt(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    completion: StrictStr = Field(
-        min_length=8,
-        max_length=160,
-        pattern=r"^[^\n.!?]+$",
-    )
+    prompt: StrictStr = Field(min_length=20, max_length=220)
 
 
 YES_NO_STARTERS = frozenset(
@@ -129,16 +125,11 @@ def require_gateway_token(
         )
 
 
-def _single_prompt_prompt(focus: str, stem: str) -> str:
+def _single_prompt_prompt(focus: str) -> str:
     return (
-        "/no_think. Complete exactly one original party-game statement about "
-        f"{focus}. The sentence stem is '{stem} ___.' Return only the words that replace "
-        "the blank in a JSON completion field; do not repeat the stem. Use 4 to 14 words "
-        "with no sentence-ending punctuation and no question. The finished statement must "
-        "be debatable on a strongly-disagree to strongly-agree scale, understandable without "
-        "specialist knowledge, non-diagnostic, and free of trivia, personal-data requests, "
-        "graphic harm, targeted politics, or a plainly correct answer. Return only the "
-        "required JSON object with no explanation or additional fields."
+        f"/no_think. Write one clear, provocative opinion about {focus}. Use one grammatical "
+        "sentence of 7 to 18 words. Avoid questions, definitions, obvious facts, and answer "
+        "labels. Return JSON only."
     )
 
 
@@ -146,15 +137,14 @@ def _single_prompt_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "completion": {
+            "prompt": {
                 "type": "string",
-                "minLength": 8,
-                "maxLength": 160,
-                "pattern": "^[^\\n.!?]+$",
-                "description": "Only the words that complete the supplied sentence stem.",
+                "minLength": 20,
+                "maxLength": 220,
+                "description": "One complete, natural, debatable opinion sentence.",
             },
         },
-        "required": ["completion"],
+        "required": ["prompt"],
         "additionalProperties": False,
     }
 
@@ -232,6 +222,30 @@ def _prompt_supports_agreement_scale(prompt: str) -> bool:
     return True
 
 
+def _prompt_has_obvious_quality_issue(prompt: str) -> bool:
+    words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", prompt.casefold())
+    if not 7 <= len(words) <= 18 or prompt[-1:] not in {".", "?"}:
+        return True
+    if re.match(r"^(?:strongly\s+)?(?:agree|disagree)\s*:", prompt, re.IGNORECASE):
+        return True
+    if re.search(
+        r"\b(?:should|could|would|must|can|may|might|will)\s+"
+        r"(?:builds|creates|encourages|has|is|makes|matters|prioritizes|promotes|requires|"
+        r"supports|values)\b",
+        prompt,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    concept_families = (
+        ("responsibility", "responsible", "accountability", "accountable"),
+        ("community", "communities"),
+        ("fairness", "fair"),
+        ("technology", "technological"),
+        ("friendship", "friends"),
+    )
+    return any(sum(words.count(term) for term in family) > 1 for family in concept_families)
+
+
 async def _generate_game_content_with_retries(
     request: GameContentRequest,
 ) -> GameContentResponse:
@@ -246,46 +260,40 @@ async def _generate_game_content_with_retries(
     accepted: list[GeneratedQuestion] = []
     avoided = {" ".join(item.split()).casefold() for item in request.avoid_prompts}
     focuses = (
-        ("everyday_life", "everyday life", "Daily routines should", 1, ["comfort", "fairness"]),
-        ("relationships", "relationships", "Friendship should", 2, ["loyalty", "honesty"]),
-        ("technology", "technology", "Technology should", 2, ["privacy", "convenience"]),
-        ("fairness", "fairness", "Fairness should", 2, ["equality", "merit"]),
-        ("community", "community", "Every community should", 2, ["freedom", "responsibility"]),
+        ("everyday_life", "whether planning makes daily life better", 1, ["comfort", "fairness"]),
+        ("relationships", "honesty between close friends", 2, ["loyalty", "honesty"]),
+        ("technology", "privacy versus convenience in technology", 2, ["privacy", "convenience"]),
+        ("fairness", "equal outcomes versus earned rewards", 2, ["equality", "merit"]),
+        ("community", "individual freedom versus community rules", 2, ["freedom", "responsibility"]),
         (
             "personal_responsibility",
-            "personal responsibility",
-            "Personal responsibility should",
+            "forgiving someone who caused unintended harm",
             3,
             ["accountability", "compassion"],
         ),
-        ("culture", "culture", "Culture should", 2, ["tradition", "change"]),
-        ("work", "work", "Work should", 1, ["ambition", "balance"]),
-        ("identity", "identity", "Identity should", 3, ["authenticity", "belonging"]),
-        ("future", "the future", "The future should", 2, ["progress", "stability"]),
+        ("culture", "culture", 2, ["tradition", "change"]),
+        ("work", "work", 1, ["ambition", "balance"]),
+        ("identity", "identity", 3, ["authenticity", "belonging"]),
+        ("future", "the future", 2, ["progress", "stability"]),
     )
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         for index in range(request.round_count):
-            category, focus, stem, intensity, values = focuses[index % len(focuses)]
+            category, focus, intensity, values = focuses[index % len(focuses)]
             for attempt in range(1, attempts + 1):
                 correction = "" if attempt == 1 else (
-                    " Your prior attempt failed semantic validation. Produce a different "
-                    "valid completion without punctuation."
+                    " Try a different, simpler sentence."
                 )
                 model_request = {
                     "model": model,
                     "messages": [
                         {
                             "role": "system",
-                            "content": (
-                                "You design fresh, safe, high-replay-value agreement prompts "
-                                "for the party game Are You Niche or NPC?. Follow the JSON "
-                                "schema exactly."
-                            ),
+                            "content": "Write concise debate statements. Follow the JSON schema.",
                         },
                         {
                             "role": "user",
-                            "content": _single_prompt_prompt(focus, stem) + correction,
+                            "content": _single_prompt_prompt(focus) + correction,
                         },
                     ],
                     "temperature": 0.95,
@@ -319,11 +327,11 @@ async def _generate_game_content_with_retries(
 
                 rejected = "structure"
                 try:
-                    generated = GeneratedCompletion.model_validate(payload)
+                    generated = GeneratedPrompt.model_validate(payload)
                 except ValidationError:
                     pass
                 else:
-                    prompt = f"{stem} {' '.join(generated.completion.split())}."
+                    prompt = " ".join(generated.prompt.split())
                     normalized = " ".join(prompt.split()).casefold()
                     seen = avoided | {
                         " ".join(item.prompt.split()).casefold() for item in accepted
@@ -332,6 +340,8 @@ async def _generate_game_content_with_retries(
                         rejected = "duplicate"
                     elif not _prompt_supports_agreement_scale(prompt):
                         rejected = "scale"
+                    elif _prompt_has_obvious_quality_issue(prompt):
+                        rejected = "quality"
                     else:
                         accepted.append(
                             GeneratedQuestion(

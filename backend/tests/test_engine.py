@@ -337,6 +337,39 @@ def test_modifier_plan_is_seeded_allowed_and_reproducible() -> None:
     )
 
 
+def test_modifier_plan_uses_each_available_type_before_repeating() -> None:
+    allowed = tuple(item.value for item in ModifierType)
+    questions = [
+        Question(
+            id=f"variety-q{number}",
+            prompt=f"Variety statement number {number} is debatable.",
+            category="social",
+            intensity=2,
+            values=("freedom", "fairness"),
+            modifiers_allowed=allowed,
+        )
+        for number in range(1, 7)
+    ]
+    room = Room(
+        code="MIXD",
+        questions=questions,
+        modifier_chance=1,
+        modifier_seed="variety-seed",
+    )
+    host = room.add_player("Host", is_host=True)
+    room.add_player("Guest")
+
+    room.start(host_id=host.id, round_count=6)
+
+    modifier_types = [
+        game_round.modifier.type
+        for game_round in room.rounds[1:]
+        if game_round.modifier is not None
+    ]
+    assert len(modifier_types) == 5
+    assert len(set(modifier_types)) == 5
+
+
 def test_devils_advocate_targets_are_balanced_and_not_back_to_back() -> None:
     room = Room(
         code="FAIR",
