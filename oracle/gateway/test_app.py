@@ -1,7 +1,8 @@
 import json
 
-import app as gateway
 from fastapi.testclient import TestClient
+
+import app as gateway
 
 
 def _content_request(count: int = 6) -> dict:
@@ -13,12 +14,32 @@ def _content_request(count: int = 6) -> dict:
 
 
 def _question(number: int) -> dict:
+    prompts = (
+        "Daily routines should leave room for unplanned choices.",
+        "Friendship matters more than avoiding every disagreement.",
+        "Technology should prioritize privacy over convenience.",
+        "Fairness sometimes requires treating people differently.",
+        "Community needs should sometimes outweigh personal convenience.",
+        "Responsibility matters even when intentions were good.",
+    )
     return {
-        "prompt": f"Fresh debatable statement number {number} for this game.",
+        "prompt": prompts[number - 1],
         "category": f"category_{number}",
         "intensity": 2,
         "values": ["autonomy", "fairness"],
     }
+
+
+def _prompt_payloads(count: int = 6) -> list[dict]:
+    completions = (
+        "leave room for unplanned choices",
+        "matter more than avoiding every disagreement",
+        "prioritize privacy over convenience",
+        "sometimes require treating people differently",
+        "put shared needs above personal convenience",
+        "matter even when intentions were good",
+    )
+    return [{"completion": completions[number - 1]} for number in range(1, count + 1)]
 
 
 def _recap_request() -> dict:
@@ -78,7 +99,7 @@ def test_gateway_returns_schema_constrained_game_content(monkeypatch) -> None:
     captured: list[dict] = []
     _install_model(
         monkeypatch,
-        [{"questions": [_question(number) for number in range(1, 7)]}],
+        _prompt_payloads(),
         captured,
     )
     response = TestClient(gateway.app).post(
@@ -89,17 +110,18 @@ def test_gateway_returns_schema_constrained_game_content(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert len(response.json()["questions"]) == 6
+    assert len(captured) == 6
     schema = captured[0]["response_format"]["schema"]
-    assert schema["properties"]["questions"]["minItems"] == 6
-    assert schema["properties"]["questions"]["maxItems"] == 6
+    assert schema["required"] == ["completion"]
+    assert set(schema["properties"]) == {"completion"}
+    assert response.json()["questions"][0]["category"] == "everyday_life"
 
 
-def test_gateway_retries_semantically_invalid_game_content(monkeypatch) -> None:
+def test_gateway_retries_a_semantically_invalid_question(monkeypatch) -> None:
     monkeypatch.setenv("GATEWAY_TOKEN", "correct-secret")
     captured: list[dict] = []
-    duplicate = _question(1)
-    valid = {"questions": [_question(number) for number in range(1, 7)]}
-    _install_model(monkeypatch, [{"questions": [duplicate] * 6}, valid], captured)
+    invalid = {"prompt": "How should friends decide?"}
+    _install_model(monkeypatch, [invalid, *_prompt_payloads()], captured)
 
     response = TestClient(gateway.app).post(
         "/v1/game-content",
@@ -108,21 +130,16 @@ def test_gateway_retries_semantically_invalid_game_content(monkeypatch) -> None:
     )
 
     assert response.status_code == 200
-    assert len(captured) == 2
+    assert len(captured) == 7
     assert "prior attempt failed" in captured[1]["messages"][1]["content"]
+    assert len({item["messages"][1]["content"] for item in captured[1:]}) == 6
 
 
 def test_gateway_retries_open_ended_questions(monkeypatch) -> None:
     monkeypatch.setenv("GATEWAY_TOKEN", "correct-secret")
     captured: list[dict] = []
-    open_ended = {
-        "questions": [
-            {**_question(number), "prompt": f"How should friends handle topic {number}?"}
-            for number in range(1, 7)
-        ]
-    }
-    valid = {"questions": [_question(number) for number in range(1, 7)]}
-    _install_model(monkeypatch, [open_ended, valid], captured)
+    open_ended = {"completion": "ask what friends should value most?"}
+    _install_model(monkeypatch, [open_ended, *_prompt_payloads()], captured)
 
     response = TestClient(gateway.app).post(
         "/v1/game-content",
@@ -131,15 +148,15 @@ def test_gateway_retries_open_ended_questions(monkeypatch) -> None:
     )
 
     assert response.status_code == 200
-    assert len(captured) == 2
+    assert len(captured) == 7
 
 
 def test_gateway_returns_422_after_invalid_retry_exhaustion(monkeypatch) -> None:
     monkeypatch.setenv("GATEWAY_TOKEN", "correct-secret")
     monkeypatch.setenv("QWEN_GENERATION_ATTEMPTS", "2")
     captured: list[dict] = []
-    duplicate = {"questions": [_question(1)] * 6}
-    _install_model(monkeypatch, [duplicate, duplicate], captured)
+    invalid = {"completion": "ask why this matters?"}
+    _install_model(monkeypatch, [invalid, invalid], captured)
 
     response = TestClient(gateway.app).post(
         "/v1/game-content",

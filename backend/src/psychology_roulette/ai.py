@@ -47,13 +47,21 @@ YES_NO_STARTERS = frozenset(
 )
 OPEN_ENDED_STARTERS = frozenset(
     {
+        "ask",
+        "choose",
+        "compare",
+        "consider",
         "describe",
+        "discuss",
         "explain",
         "how",
         "identify",
+        "imagine",
         "list",
         "name",
         "rank",
+        "share",
+        "tell",
         "what",
         "when",
         "where",

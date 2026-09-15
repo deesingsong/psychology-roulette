@@ -45,6 +45,16 @@ class GeneratedQuestion(BaseModel):
     values: list[StrictStr] = Field(min_length=2, max_length=4)
 
 
+class GeneratedCompletion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    completion: StrictStr = Field(
+        min_length=8,
+        max_length=160,
+        pattern=r"^[^\n.!?]+$",
+    )
+
+
 YES_NO_STARTERS = frozenset(
     {
         "are", "can", "could", "did", "do", "does", "has", "have", "is",
@@ -53,8 +63,9 @@ YES_NO_STARTERS = frozenset(
 )
 OPEN_ENDED_STARTERS = frozenset(
     {
-        "describe", "explain", "how", "identify", "list", "name", "rank", "what",
-        "when", "where", "which", "who", "whom", "whose", "why",
+        "ask", "choose", "compare", "consider", "describe", "discuss", "explain",
+        "how", "identify", "imagine", "list", "name", "rank", "share", "tell",
+        "what", "when", "where", "which", "who", "whom", "whose", "why",
     }
 )
 
@@ -118,66 +129,32 @@ def require_gateway_token(
         )
 
 
-def _game_content_prompt(request: GameContentRequest) -> str:
+def _single_prompt_prompt(focus: str, stem: str) -> str:
     return (
-        "/no_think. Create a fresh party-game pack with exactly "
-        f"{request.round_count} original prompts. Players respond on a scale from strongly "
-        "disagree to strongly agree. Prefer a concise declarative claim, such as 'Privacy "
-        "matters more than convenience.' A question is allowed only when it has a yes/no "
-        "answer and begins with an auxiliary such as should, is, are, can, could, would, do, "
-        "does, will, must, has, or have. Never begin with how, what, why, who, when, where, "
-        "which, explain, describe, identify, name, list, or rank. Every prompt must be "
-        "debatable, understandable without specialist "
-        "knowledge, non-diagnostic, and meaningfully different from the others. Use at "
-        "several categories across the pack. Avoid trivia, personal-data requests, "
-        "graphic harm, targeted politics, and a plainly correct answer. Values are 2-4 "
-        "lowercase snake_case principles. Do not generate discussion questions, angles, "
-        "explanations, or any fields outside the schema. Return only the required JSON object. Do not "
-        "repeat these "
-        "existing prompts: "
-        + json.dumps(request.avoid_prompts, ensure_ascii=False, separators=(",", ":"))
+        "/no_think. Complete exactly one original party-game statement about "
+        f"{focus}. The sentence stem is '{stem} ___.' Return only the words that replace "
+        "the blank in a JSON completion field; do not repeat the stem. Use 4 to 14 words "
+        "with no sentence-ending punctuation and no question. The finished statement must "
+        "be debatable on a strongly-disagree to strongly-agree scale, understandable without "
+        "specialist knowledge, non-diagnostic, and free of trivia, personal-data requests, "
+        "graphic harm, targeted politics, or a plainly correct answer. Return only the "
+        "required JSON object with no explanation or additional fields."
     )
 
 
-def _game_content_schema(count: int) -> dict[str, Any]:
+def _single_prompt_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "questions": {
-                "type": "array",
-                "minItems": count,
-                "maxItems": count,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {"type": "string", "minLength": 20, "maxLength": 320},
-                        "category": {
-                            "type": "string",
-                            "pattern": "^[a-z][a-z0-9_]{1,39}$",
-                        },
-                        "intensity": {"type": "integer", "enum": [1, 2, 3]},
-                        "values": {
-                            "type": "array",
-                            "minItems": 2,
-                            "maxItems": 4,
-                            "uniqueItems": True,
-                            "items": {
-                                "type": "string",
-                                "pattern": "^[a-z][a-z0-9_]{1,39}$",
-                            },
-                        },
-                    },
-                    "required": [
-                        "prompt",
-                        "category",
-                        "intensity",
-                        "values",
-                    ],
-                    "additionalProperties": False,
-                },
-            }
+            "completion": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 160,
+                "pattern": "^[^\\n.!?]+$",
+                "description": "Only the words that complete the supplied sentence stem.",
+            },
         },
-        "required": ["questions"],
+        "required": ["completion"],
         "additionalProperties": False,
     }
 
@@ -238,22 +215,6 @@ def _extract_json(text: str) -> Any:
     return json.loads(text[start : end + 1])
 
 
-def _validate_game_content(payload: Any, request: GameContentRequest) -> GameContentResponse:
-    generated = GameContentResponse.model_validate(payload)
-    if len(generated.questions) != request.round_count:
-        raise ValueError("Question count did not match the request.")
-    prompts = {" ".join(item.prompt.split()).casefold() for item in generated.questions}
-    avoided = {" ".join(item.split()).casefold() for item in request.avoid_prompts}
-    if len(prompts) != request.round_count or prompts & avoided:
-        raise ValueError("Question pack contained a duplicate prompt.")
-    for item in generated.questions:
-        if not _prompt_supports_agreement_scale(item.prompt):
-            raise ValueError("A prompt was not a statement or yes/no question.")
-        if len(set(item.values)) != len(item.values):
-            raise ValueError("Question values must be unique.")
-    return generated
-
-
 def _prompt_supports_agreement_scale(prompt: str) -> bool:
     match = re.match(r"[A-Za-z]+", prompt)
     if match is None:
@@ -269,6 +230,137 @@ def _prompt_supports_agreement_scale(prompt: str) -> bool:
             and first_word in YES_NO_STARTERS
         )
     return True
+
+
+async def _generate_game_content_with_retries(
+    request: GameContentRequest,
+) -> GameContentResponse:
+    base_url = os.environ.get("LLAMA_BASE_URL", "http://model:8080").rstrip("/")
+    model = os.environ.get("LLAMA_MODEL", "qwen3-0.6b")
+    try:
+        timeout = float(os.environ.get("LLAMA_TIMEOUT_SECONDS", "60"))
+        attempts = int(os.environ.get("QWEN_GENERATION_ATTEMPTS", "3"))
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail="Model runtime is misconfigured.") from exc
+    attempts = min(max(attempts, 1), 5)
+    accepted: list[GeneratedQuestion] = []
+    avoided = {" ".join(item.split()).casefold() for item in request.avoid_prompts}
+    focuses = (
+        ("everyday_life", "everyday life", "Daily routines should", 1, ["comfort", "fairness"]),
+        ("relationships", "relationships", "Friendship should", 2, ["loyalty", "honesty"]),
+        ("technology", "technology", "Technology should", 2, ["privacy", "convenience"]),
+        ("fairness", "fairness", "Fairness should", 2, ["equality", "merit"]),
+        ("community", "community", "Every community should", 2, ["freedom", "responsibility"]),
+        (
+            "personal_responsibility",
+            "personal responsibility",
+            "Personal responsibility should",
+            3,
+            ["accountability", "compassion"],
+        ),
+        ("culture", "culture", "Culture should", 2, ["tradition", "change"]),
+        ("work", "work", "Work should", 1, ["ambition", "balance"]),
+        ("identity", "identity", "Identity should", 3, ["authenticity", "belonging"]),
+        ("future", "the future", "The future should", 2, ["progress", "stability"]),
+    )
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for index in range(request.round_count):
+            category, focus, stem, intensity, values = focuses[index % len(focuses)]
+            for attempt in range(1, attempts + 1):
+                correction = "" if attempt == 1 else (
+                    " Your prior attempt failed semantic validation. Produce a different "
+                    "valid completion without punctuation."
+                )
+                model_request = {
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You design fresh, safe, high-replay-value agreement prompts "
+                                "for the party game Are You Niche or NPC?. Follow the JSON "
+                                "schema exactly."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": _single_prompt_prompt(focus, stem) + correction,
+                        },
+                    ],
+                    "temperature": 0.95,
+                    "top_p": 0.85,
+                    "top_k": 30,
+                    "min_p": 0,
+                    "presence_penalty": 1.25,
+                    "max_tokens": 90,
+                    "cache_prompt": True,
+                    "response_format": {
+                        "type": "json_object",
+                        "schema": _single_prompt_schema(),
+                    },
+                }
+                try:
+                    response = await client.post(
+                        f"{base_url}/v1/chat/completions",
+                        json=model_request,
+                    )
+                    response.raise_for_status()
+                    model_payload = response.json()
+                    content = model_payload["choices"][0]["message"]["content"]
+                    payload = _extract_json(content)
+                except (httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="The Qwen runtime is unavailable.",
+                    ) from exc
+                except (ValueError, json.JSONDecodeError):
+                    payload = None
+
+                rejected = "structure"
+                try:
+                    generated = GeneratedCompletion.model_validate(payload)
+                except ValidationError:
+                    pass
+                else:
+                    prompt = f"{stem} {' '.join(generated.completion.split())}."
+                    normalized = " ".join(prompt.split()).casefold()
+                    seen = avoided | {
+                        " ".join(item.prompt.split()).casefold() for item in accepted
+                    }
+                    if normalized in seen:
+                        rejected = "duplicate"
+                    elif not _prompt_supports_agreement_scale(prompt):
+                        rejected = "scale"
+                    else:
+                        accepted.append(
+                            GeneratedQuestion(
+                                prompt=prompt,
+                                category=category,
+                                intensity=intensity,
+                                values=values,
+                            )
+                        )
+                        break
+                print(
+                    json.dumps(
+                        {
+                            "message": "Qwen question rejected",
+                            "question_number": index + 1,
+                            "attempt": attempt,
+                            "reason": rejected,
+                        },
+                        separators=(",", ":"),
+                    ),
+                    flush=True,
+                )
+            else:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Qwen could not produce valid content after constrained retries.",
+                )
+
+    return GameContentResponse(questions=accepted)
 
 
 def _validate_recap(
@@ -371,17 +463,7 @@ async def game_content(
     request: GameContentRequest,
     _authorized: Annotated[None, Depends(require_gateway_token)],
 ) -> GameContentResponse:
-    return await _generate_with_retries(
-        system=(
-            "You design fresh, safe, high-replay-value agreement prompts for the party "
-            "game Are You Niche or NPC?. Follow the JSON schema exactly."
-        ),
-        prompt=_game_content_prompt(request),
-        schema=_game_content_schema(request.round_count),
-        validator=lambda payload: _validate_game_content(payload, request),
-        max_tokens=520,
-        temperature=0.95,
-    )
+    return await _generate_game_content_with_retries(request)
 
 
 @app.post("/v1/session-recap", response_model=SessionRecapResponse)
