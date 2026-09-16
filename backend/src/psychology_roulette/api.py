@@ -239,6 +239,7 @@ def room_view(room: Room) -> RoomView:
         RoomPhase.REVEAL,
         RoomPhase.FOLLOW_UP,
         RoomPhase.FOLLOW_UP_REVEAL,
+        RoomPhase.FINALIZING,
         RoomPhase.COMPLETE,
     }
 
@@ -273,6 +274,7 @@ def room_view(room: Room) -> RoomView:
             RoomPhase.REVEAL,
             RoomPhase.FOLLOW_UP,
             RoomPhase.FOLLOW_UP_REVEAL,
+            RoomPhase.FINALIZING,
             RoomPhase.COMPLETE,
         }
     ):
@@ -454,10 +456,18 @@ def _start_prepared_room(room: Room, player_id: str, *, ai_enabled: bool) -> Non
     room.start(host_id=player_id)
 
 
-def _advance_with_recap(room: Room, player_id: str, recap) -> None:
+def _begin_recap_generation(room: Room, player_id: str) -> None:
     room.advance(host_id=player_id)
-    if room.phase is RoomPhase.COMPLETE:
-        room.session_recap = recap
+    if room.phase is not RoomPhase.COMPLETE:
+        raise GameError("The final round is not ready to complete.")
+    room.phase = RoomPhase.FINALIZING
+
+
+def _finish_recap_generation(room: Room, recap) -> None:
+    if room.phase is not RoomPhase.FINALIZING:
+        return
+    room.session_recap = recap
+    room.phase = RoomPhase.COMPLETE
 
 
 def create_app(
@@ -744,24 +754,31 @@ def create_app(
     def advance_round(code: str, access_token: AccessToken) -> RoomView:
         if active_ai_provider is not None:
             preview, player = active_store.read(code, access_token)
+            if preview.phase is RoomPhase.FINALIZING:
+                return room_view(preview)
             candidate = deepcopy(preview)
             candidate.advance(host_id=player.id)
             if candidate.phase is RoomPhase.COMPLETE:
+                active_store.mutate(
+                    code,
+                    access_token,
+                    _begin_recap_generation,
+                )
+                recap = None
                 try:
                     recap = active_ai_provider.generate_session_recap(candidate)
-                except AIServiceUnavailable:
+                except (AIInvalidOutput, AIServiceUnavailable):
                     logger.exception(
-                        "Qwen is unavailable; completing with deterministic statistics."
+                        "AI recap unavailable; completing with deterministic statistics."
                     )
-                else:
-                    room = active_store.mutate(
-                        code,
-                        access_token,
-                        lambda active_room, player_id: _advance_with_recap(
-                            active_room, player_id, recap
-                        ),
-                    )
-                    return room_view(room)
+                room = active_store.mutate(
+                    code,
+                    access_token,
+                    lambda active_room, _player_id: _finish_recap_generation(
+                        active_room, recap
+                    ),
+                )
+                return room_view(room)
         room = active_store.mutate(
             code,
             access_token,

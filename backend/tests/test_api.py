@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from psychology_roulette.ai import AIInvalidOutput, AIServiceUnavailable, GameContent
 from psychology_roulette.api import EntryRateLimits, create_app
-from psychology_roulette.domain import Question, RecapHighlight, SessionRecap
+from psychology_roulette.domain import Question, RecapHighlight, RoomPhase, SessionRecap
 from psychology_roulette.store import RoomStore
 
 
@@ -668,61 +668,6 @@ def test_devils_advocate_api_collects_and_reveals_the_selected_players_case() ->
     ]
 
 
-def test_steelman_api_reveals_only_the_selected_players_finished_text() -> None:
-    client, code, host_token, guest_token = _client_at_second_round("steelman")
-    client.post(
-        f"/api/rooms/{code}/answers",
-        headers=_auth(host_token),
-        json={"position": -100, "confidence": 75},
-    )
-    answered = client.post(
-        f"/api/rooms/{code}/answers",
-        headers=_auth(guest_token),
-        json={"position": 100, "confidence": 65},
-    )
-    assert answered.json()["modifier"] is None
-
-    revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token)).json()
-    modifier = revealed["modifier"]
-    assert modifier["type"] == "steelman"
-    assert modifier["target_player_name"] in {"Host", "Guest"}
-    assert modifier["source_player_name"] in {"Host", "Guest"}
-    assert modifier["target_player_name"] != modifier["source_player_name"]
-    assert modifier["results"] is None
-
-    follow_up = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
-    assert follow_up["phase"] == "follow_up"
-    assert follow_up["modifier"]["required_submissions"] == 1
-    selected_token = host_token if modifier["target_player_name"] == "Host" else guest_token
-    other_token = guest_token if selected_token == host_token else host_token
-    rejected = client.post(
-        f"/api/rooms/{code}/modifier-submissions",
-        headers=_auth(other_token),
-        json={"value": "I should not be able to submit this."},
-    )
-    assert rejected.status_code == 409
-
-    submitted = client.post(
-        f"/api/rooms/{code}/modifier-submissions",
-        headers=_auth(selected_token),
-        json={"value": "Their view protects a real cost that deserves attention."},
-    ).json()
-    assert submitted["modifier"]["results"] is None
-    public_follow_up = client.get(f"/api/rooms/{code}", headers=_auth(other_token)).json()
-    assert public_follow_up["modifier"]["results"] is None
-
-    result = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
-    assert result["phase"] == "follow_up_reveal"
-    assert result["modifier"]["results"] == [
-        {
-            "player_name": modifier["target_player_name"],
-            "value": "Their view protects a real cost that deserves attention.",
-            "score": None,
-            "movement": None,
-        }
-    ]
-
-
 def test_change_my_mind_api_keeps_repoll_private_and_reveals_movement() -> None:
     client, code, host_token, guest_token = _client_at_second_round("change_my_mind")
     client.post(
@@ -866,6 +811,9 @@ def test_final_advance_persists_and_returns_ai_recap() -> None:
 
         def generate_session_recap(self, room):
             assert room.phase.value == "complete"
+            assert store.get(code).phase is RoomPhase.FINALIZING
+            guest_room, _guest_player = store.read(code, guest_token)
+            assert guest_room.phase is RoomPhase.FINALIZING
             return SessionRecap(
                 headline="The table found a fault line",
                 summary="Six rounds produced one especially memorable split.",

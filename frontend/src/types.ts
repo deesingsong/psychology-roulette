@@ -5,6 +5,7 @@ export type RoomPhase =
   | "reveal"
   | "follow_up"
   | "follow_up_reveal"
+  | "finalizing"
   | "complete";
 
 export type ModifierType =

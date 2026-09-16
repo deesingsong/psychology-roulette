@@ -805,9 +805,12 @@ function Game({
           startedAt={recapStartedAt}
           estimateSeconds={RECAP_GENERATION_ESTIMATE_SECONDS}
           eyebrow="BUILDING THE FINAL TABLE"
-          title="Qwen is finding the night's best moments."
+          title="Finding the night's best moments."
           detail="Checking the verified scores and choosing the most interesting stats."
         />
+      )}
+      {recapStartedAt === null && room.phase === "finalizing" && (
+        <SharedRecapProgress />
       )}
 
       {room.phase === "lobby" && (
@@ -904,6 +907,19 @@ function Game({
         </button>
       )}
     </main>
+  );
+}
+
+function SharedRecapProgress() {
+  const [startedAt] = useState(() => Date.now() / 1000);
+  return (
+    <EstimatedProgress
+      startedAt={startedAt}
+      estimateSeconds={RECAP_GENERATION_ESTIMATE_SECONDS}
+      eyebrow="BUILDING THE FINAL TABLE"
+      title="Finding the night's best moments."
+      detail="Checking the verified scores and choosing the most interesting stats."
+    />
   );
 }
 

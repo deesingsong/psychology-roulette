@@ -210,53 +210,6 @@ def test_devils_advocate_is_a_post_reveal_targeted_challenge() -> None:
     )
 
 
-def test_steelman_selects_a_counterpart_and_keeps_the_draft_private() -> None:
-    room, host_id, guest_id = _room_at_modifier_round(ModifierType.STEELMAN)
-    current_round = room.current_round
-    assert current_round and current_round.modifier
-    modifier = current_round.modifier
-    assert modifier.timing is ModifierTiming.POST_REVEAL
-    assert modifier.target_player_id in {host_id, guest_id}
-
-    room.submit_answer(player_id=host_id, position=-100, confidence=75)
-    room.submit_answer(player_id=guest_id, position=100, confidence=65)
-    room.reveal(host_id=host_id)
-
-    assert room.phase is RoomPhase.REVEAL
-    assert modifier.source_player_id in {host_id, guest_id}
-    assert modifier.source_player_id != modifier.target_player_id
-    assert modifier.results == {}
-
-    room.advance(host_id=host_id)
-    assert room.phase is RoomPhase.FOLLOW_UP
-    selected_id = modifier.target_player_id
-    other_id = guest_id if selected_id == host_id else host_id
-    assert room.modifier_required_player_ids() == {selected_id}
-
-    with pytest.raises(GameError, match="selected player"):
-        room.submit_modifier(player_id=other_id, value="A fair account")
-    with pytest.raises(GameError, match="short response"):
-        room.submit_modifier(player_id=selected_id, value="   ")
-    with pytest.raises(GameError, match="280"):
-        room.submit_modifier(player_id=selected_id, value="x" * 281)
-    with pytest.raises(GameError, match="required player"):
-        room.advance(host_id=host_id)
-
-    room.submit_modifier(
-        player_id=selected_id,
-        value="  Their view protects a concern the room should take seriously.  ",
-    )
-    assert modifier.results == {}
-    room.advance(host_id=host_id)
-
-    assert room.phase is RoomPhase.FOLLOW_UP_REVEAL
-    assert modifier.results[selected_id].value == (
-        "Their view protects a concern the room should take seriously."
-    )
-    room.advance(host_id=host_id)
-    assert room.phase is RoomPhase.COMPLETE
-
-
 def test_change_my_mind_repolls_privately_and_records_movement() -> None:
     room, host_id, guest_id = _room_at_modifier_round(ModifierType.CHANGE_MY_MIND)
     current_round = room.current_round
@@ -386,7 +339,8 @@ def test_modifier_plan_uses_each_available_type_before_repeating() -> None:
         if game_round.modifier is not None
     ]
     assert len(modifier_types) == 5
-    assert len(set(modifier_types)) == 5
+    assert len(set(modifier_types[:4])) == 4
+    assert ModifierType.STEELMAN not in modifier_types
 
 
 def test_devils_advocate_targets_are_balanced_and_not_back_to_back() -> None:

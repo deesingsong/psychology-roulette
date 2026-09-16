@@ -32,7 +32,6 @@ SUPPORTED_MODIFIERS = (
     ModifierType.PREDICT_ROOM,
     ModifierType.SECRET_PRINCIPLE,
     ModifierType.DEVILS_ADVOCATE,
-    ModifierType.STEELMAN,
     ModifierType.CHANGE_MY_MIND,
 )
 FOLLOW_UP_MODIFIERS = {

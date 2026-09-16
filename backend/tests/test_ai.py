@@ -78,7 +78,6 @@ def test_http_provider_generates_and_validates_a_fresh_question_pack(monkeypatch
         "predict_room",
         "secret_principle",
         "devils_advocate",
-        "steelman",
         "change_my_mind",
     }
 

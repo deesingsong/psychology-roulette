@@ -174,6 +174,9 @@ def test_gateway_rejects_obvious_grammar_and_tautology_failures() -> None:
         "A clear, concise debate statement about the tension between individual freedom and community rules."
     )
     assert gateway._prompt_has_obvious_quality_issue(
+        "Forging someone's pain to heal their wound instead of leaving them hurt."
+    )
+    assert gateway._prompt_has_obvious_quality_issue(
         "Personal responsibility requires individuals to accept accountability for every action."
     )
     assert gateway._prompt_has_obvious_quality_issue(

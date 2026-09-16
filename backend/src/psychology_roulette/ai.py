@@ -21,7 +21,9 @@ from psychology_roulette.domain import (
 MAX_RESPONSE_BYTES = 128 * 1024
 MAX_QUESTION_LENGTH = 320
 MAX_COPY_LENGTH = 240
-SUPPORTED_MODIFIERS = tuple(item.value for item in ModifierType)
+SUPPORTED_MODIFIERS = tuple(
+    item.value for item in ModifierType if item is not ModifierType.STEELMAN
+)
 VALUE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
 YES_NO_STARTERS = frozenset(
     {

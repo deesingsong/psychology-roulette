@@ -5,7 +5,7 @@
     "category": "ethics",
     "intensity": 2,
     "values": ["autonomy", "harm", "responsibility"],
-    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "change_my_mind", "steelman"]
+    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "change_my_mind"]
   },
   {
     "id": "human_nature_001",
@@ -13,7 +13,7 @@
     "category": "human_nature",
     "intensity": 1,
     "values": ["trust", "security", "character"],
-    "modifiers_allowed": ["predict_room", "devils_advocate", "steelman"]
+    "modifiers_allowed": ["predict_room", "devils_advocate"]
   },
   {
     "id": "relationships_001",
@@ -29,7 +29,7 @@
     "category": "society",
     "intensity": 2,
     "values": ["freedom", "fairness", "harm"],
-    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "steelman"]
+    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate"]
   },
   {
     "id": "psychology_001",
@@ -45,7 +45,7 @@
     "category": "philosophy",
     "intensity": 2,
     "values": ["truth", "wellbeing", "autonomy"],
-    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "steelman", "change_my_mind"]
+    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "change_my_mind"]
   },
   {
     "id": "society_002",
@@ -53,7 +53,7 @@
     "category": "society",
     "intensity": 2,
     "values": ["loyalty", "responsibility", "courage"],
-    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate", "steelman"]
+    "modifiers_allowed": ["predict_room", "secret_principle", "devils_advocate"]
   },
   {
     "id": "absurd_001",

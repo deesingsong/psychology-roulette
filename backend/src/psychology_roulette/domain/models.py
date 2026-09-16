@@ -11,6 +11,7 @@ class RoomPhase(StrEnum):
     REVEAL = "reveal"
     FOLLOW_UP = "follow_up"
     FOLLOW_UP_REVEAL = "follow_up_reveal"
+    FINALIZING = "finalizing"
     COMPLETE = "complete"
 
 
