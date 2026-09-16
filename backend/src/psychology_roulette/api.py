@@ -279,7 +279,12 @@ def room_view(room: Room) -> RoomView:
         modifier = current_round.modifier
         results = None
         results_visible = answers_visible and not (
-            modifier.type in {ModifierType.STEELMAN, ModifierType.CHANGE_MY_MIND}
+            modifier.type
+            in {
+                ModifierType.DEVILS_ADVOCATE,
+                ModifierType.STEELMAN,
+                ModifierType.CHANGE_MY_MIND,
+            }
             and room.phase not in {RoomPhase.FOLLOW_UP_REVEAL, RoomPhase.COMPLETE}
         )
         if results_visible:

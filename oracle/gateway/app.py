@@ -229,6 +229,13 @@ def _prompt_has_obvious_quality_issue(prompt: str) -> bool:
     if re.match(r"^(?:strongly\s+)?(?:agree|disagree)\s*:", prompt, re.IGNORECASE):
         return True
     if re.search(
+        r"\b(?:debate|discussion) statement\b|"
+        r"\b(?:statement|opinion|question) about\b",
+        prompt,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(
         r"\b(?:should|could|would|must|can|may|might|will)\s+"
         r"(?:builds|creates|encourages|has|is|makes|matters|prioritizes|promotes|requires|"
         r"supports|values)\b",

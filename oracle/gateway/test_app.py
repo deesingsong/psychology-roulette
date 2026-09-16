@@ -171,6 +171,9 @@ def test_gateway_rejects_obvious_grammar_and_tautology_failures() -> None:
         "Strongly agree: Relationships should prioritize trust over control and respect over dominance."
     )
     assert gateway._prompt_has_obvious_quality_issue(
+        "A clear, concise debate statement about the tension between individual freedom and community rules."
+    )
+    assert gateway._prompt_has_obvious_quality_issue(
         "Personal responsibility requires individuals to accept accountability for every action."
     )
     assert gateway._prompt_has_obvious_quality_issue(

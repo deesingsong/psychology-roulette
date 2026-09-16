@@ -612,7 +612,7 @@ def test_secret_principle_api_reveals_selections_only_at_reveal() -> None:
     ]
 
 
-def test_devils_advocate_api_is_hidden_until_the_reveal() -> None:
+def test_devils_advocate_api_collects_and_reveals_the_selected_players_case() -> None:
     client, code, host_token, guest_token = _client_at_second_round("devils_advocate")
     client.post(
         f"/api/rooms/{code}/answers",
@@ -627,15 +627,45 @@ def test_devils_advocate_api_is_hidden_until_the_reveal() -> None:
     assert answered.json()["phase"] == "answering"
     assert answered.json()["modifier"] is None
 
-    revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token))
-    modifier = revealed.json()["modifier"]
+    revealed = client.post(f"/api/rooms/{code}/reveal", headers=_auth(host_token)).json()
+    modifier = revealed["modifier"]
     assert modifier["type"] == "devils_advocate"
     assert modifier["timing"] == "post_reveal"
     assert modifier["target_player_name"] in {"Host", "Guest"}
-    assert modifier["required_submissions"] == 0
+    assert modifier["required_submissions"] == 1
     assert modifier["submissions_count"] == 0
     assert modifier["options"] == []
-    assert modifier["results"] == []
+    assert modifier["results"] is None
+
+    follow_up = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
+    assert follow_up["phase"] == "follow_up"
+    selected_token = (
+        host_token if modifier["target_player_name"] == "Host" else guest_token
+    )
+    other_token = guest_token if selected_token == host_token else host_token
+    rejected = client.post(
+        f"/api/rooms/{code}/modifier-submissions",
+        headers=_auth(other_token),
+        json={"value": "I was not selected for this challenge."},
+    )
+    assert rejected.status_code == 409
+
+    submitted = client.post(
+        f"/api/rooms/{code}/modifier-submissions",
+        headers=_auth(selected_token),
+        json={"value": "The opposing side protects a legitimate concern."},
+    ).json()
+    assert submitted["modifier"]["results"] is None
+    result = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
+    assert result["phase"] == "follow_up_reveal"
+    assert result["modifier"]["results"] == [
+        {
+            "player_name": modifier["target_player_name"],
+            "value": "The opposing side protects a legitimate concern.",
+            "score": None,
+            "movement": None,
+        }
+    ]
 
 
 def test_steelman_api_reveals_only_the_selected_players_finished_text() -> None:
@@ -784,7 +814,7 @@ def test_default_six_round_api_session_reaches_completion() -> None:
         room = client.post(f"/api/rooms/{code}/advance", headers=_auth(host_token)).json()
         if room["phase"] == "follow_up":
             modifier = room["modifier"]
-            if modifier["type"] == "steelman":
+            if modifier["type"] in {"devils_advocate", "steelman"}:
                 selected_token = (
                     host_token if modifier["target_player_name"] == "Host" else guest_token
                 )

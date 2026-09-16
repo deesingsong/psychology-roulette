@@ -35,7 +35,11 @@ SUPPORTED_MODIFIERS = (
     ModifierType.STEELMAN,
     ModifierType.CHANGE_MY_MIND,
 )
-FOLLOW_UP_MODIFIERS = {ModifierType.STEELMAN, ModifierType.CHANGE_MY_MIND}
+FOLLOW_UP_MODIFIERS = {
+    ModifierType.DEVILS_ADVOCATE,
+    ModifierType.STEELMAN,
+    ModifierType.CHANGE_MY_MIND,
+}
 
 
 class GameError(ValueError):
@@ -148,16 +152,19 @@ class Room:
         elif modifier.type is ModifierType.SECRET_PRINCIPLE:
             if type(value) is not str or value not in modifier.options:
                 raise GameError("Choose one of the question's listed principles.")
-        elif modifier.type is ModifierType.STEELMAN:
+        elif modifier.type in {
+            ModifierType.DEVILS_ADVOCATE,
+            ModifierType.STEELMAN,
+        }:
             if player_id != modifier.target_player_id:
-                raise GameError("Only the selected player submits this steelman.")
+                raise GameError("Only the selected player submits this written challenge.")
             if type(value) is not str:
-                raise GameError("Write a short steelman before submitting.")
+                raise GameError("Write a short response before submitting.")
             value = " ".join(value.split())
             if not value:
-                raise GameError("Write a short steelman before submitting.")
+                raise GameError("Write a short response before submitting.")
             if len(value) > 280:
-                raise GameError("Keep the steelman to 280 characters or fewer.")
+                raise GameError("Keep the response to 280 characters or fewer.")
         elif modifier.type is ModifierType.CHANGE_MY_MIND:
             if type(value) is not int or value not in POSITION_VALUES:
                 raise GameError("Choose one of the seven available positions.")
@@ -246,7 +253,11 @@ class Room:
             return set(self.players)
         if modifier.type is ModifierType.CHANGE_MY_MIND:
             return set(self.players)
-        if modifier.type is ModifierType.STEELMAN and modifier.target_player_id:
+        if (
+            modifier.type
+            in {ModifierType.DEVILS_ADVOCATE, ModifierType.STEELMAN}
+            and modifier.target_player_id
+        ):
             return {modifier.target_player_id}
         return set()
 
@@ -564,7 +575,10 @@ class Room:
         modifier = game_round.modifier
         if not modifier:
             return
-        if modifier.type is ModifierType.STEELMAN:
+        if modifier.type in {
+            ModifierType.DEVILS_ADVOCATE,
+            ModifierType.STEELMAN,
+        }:
             modifier.results = {
                 player_id: ModifierResult(player_id=player_id, value=submission.value)
                 for player_id, submission in modifier.submissions.items()

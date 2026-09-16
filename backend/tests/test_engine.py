@@ -190,6 +190,25 @@ def test_devils_advocate_is_a_post_reveal_targeted_challenge() -> None:
     assert current_round.modifier.results == {}
     assert "middle" in current_round.modifier.instructions.lower()
 
+    room.advance(host_id=host_id)
+    assert room.phase is RoomPhase.FOLLOW_UP
+    assert room.modifier_required_player_ids() == {target_id}
+    other_id = guest_id if target_id == host_id else host_id
+    with pytest.raises(GameError, match="selected player"):
+        room.submit_modifier(player_id=other_id, value="The other side has a point.")
+    with pytest.raises(GameError, match="short response"):
+        room.submit_modifier(player_id=target_id, value="   ")
+
+    room.submit_modifier(
+        player_id=target_id,
+        value="  The opposing view protects an important concern we should not dismiss.  ",
+    )
+    room.advance(host_id=host_id)
+    assert room.phase is RoomPhase.FOLLOW_UP_REVEAL
+    assert current_round.modifier.results[target_id].value == (
+        "The opposing view protects an important concern we should not dismiss."
+    )
+
 
 def test_steelman_selects_a_counterpart_and_keeps_the_draft_private() -> None:
     room, host_id, guest_id = _room_at_modifier_round(ModifierType.STEELMAN)
@@ -216,7 +235,7 @@ def test_steelman_selects_a_counterpart_and_keeps_the_draft_private() -> None:
 
     with pytest.raises(GameError, match="selected player"):
         room.submit_modifier(player_id=other_id, value="A fair account")
-    with pytest.raises(GameError, match="short steelman"):
+    with pytest.raises(GameError, match="short response"):
         room.submit_modifier(player_id=selected_id, value="   ")
     with pytest.raises(GameError, match="280"):
         room.submit_modifier(player_id=selected_id, value="x" * 281)

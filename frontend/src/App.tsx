@@ -119,6 +119,7 @@ function willCompleteOnAdvance(room: RoomView) {
   if (room.phase === "follow_up_reveal") return true;
   return (
     room.phase === "reveal" &&
+    room.modifier?.type !== "devils_advocate" &&
     room.modifier?.type !== "steelman" &&
     room.modifier?.type !== "change_my_mind"
   );
@@ -1327,7 +1328,7 @@ function FollowUpStage({
   onReveal: () => void;
 }) {
   const [position, setPosition] = useState<number | null>(null);
-  const [steelman, setSteelman] = useState("");
+  const [writtenResponse, setWrittenResponse] = useState("");
   const modifier = room.modifier;
   const me = room.players.find((player) => player.name === session.playerName);
   const everyoneSubmitted =
@@ -1343,10 +1344,13 @@ function FollowUpStage({
     );
   }
 
-  const isSteelmanWriter =
-    modifier.type === "steelman" &&
+  const isWrittenChallenge = ["devils_advocate", "steelman"].includes(
+    modifier.type,
+  );
+  const isSelectedWriter =
+    isWrittenChallenge &&
     modifier.target_player_name === session.playerName;
-  const shouldSubmit = modifier.type === "change_my_mind" || isSteelmanWriter;
+  const shouldSubmit = modifier.type === "change_my_mind" || isSelectedWriter;
 
   return (
     <section className="stage modifier-stage follow-up-stage">
@@ -1367,11 +1371,28 @@ function FollowUpStage({
         </div>
       )}
 
+      {modifier.type === "devils_advocate" && (
+        <div className="modifier-question">
+          <span>THE CHALLENGE</span>
+          <p>
+            <strong>{modifier.target_player_name}</strong> must make the
+            strongest case against their own position.
+          </p>
+        </div>
+      )}
+
       {!shouldSubmit ? (
         <div className="submitted-panel modifier-wait">
           <span className="pulse violet-pulse" />
-          <h2>Listen for a fair restatement.</h2>
-          <p>{modifier.target_player_name} is writing the steelman.</p>
+          <h2>
+            {modifier.type === "steelman"
+              ? "Listen for a fair restatement."
+              : "Wait for the opposing case."}
+          </h2>
+          <p>
+            {modifier.target_player_name} is writing their{" "}
+            {modifier.type === "steelman" ? "steelman" : "counterargument"}.
+          </p>
         </div>
       ) : me?.has_modifier_submitted ? (
         <div className="submitted-panel modifier-wait">
@@ -1382,26 +1403,36 @@ function FollowUpStage({
             responses are in.
           </p>
         </div>
-      ) : modifier.type === "steelman" ? (
+      ) : isWrittenChallenge ? (
         <div className="answer-panel modifier-input">
           <label className="steelman-field">
-            <span>YOUR STRONGEST FAIR RESTATEMENT</span>
+            <span>
+              {modifier.type === "steelman"
+                ? "YOUR STRONGEST FAIR RESTATEMENT"
+                : "YOUR STRONGEST OPPOSING CASE"}
+            </span>
             <textarea
-              value={steelman}
+              value={writtenResponse}
               maxLength={280}
               rows={5}
               disabled={pending}
-              onChange={(event) => setSteelman(event.target.value)}
-              placeholder="State their reasoning in terms they could endorse..."
+              onChange={(event) => setWrittenResponse(event.target.value)}
+              placeholder={
+                modifier.type === "steelman"
+                  ? "State their reasoning in terms they could endorse..."
+                  : "Make the best good-faith argument for the other side..."
+              }
             />
-            <small>{steelman.trim().length}/280</small>
+            <small>{writtenResponse.trim().length}/280</small>
           </label>
           <button
             className="button primary wide"
-            disabled={!steelman.trim() || pending}
-            onClick={() => onSubmit(steelman)}
+            disabled={!writtenResponse.trim() || pending}
+            onClick={() => onSubmit(writtenResponse)}
           >
-            Lock the steelman
+            {modifier.type === "steelman"
+              ? "Lock the steelman"
+              : "Lock the opposing case"}
           </button>
         </div>
       ) : (
@@ -1443,8 +1474,10 @@ function FollowUpStage({
           disabled={pending}
           onClick={onReveal}
         >
-          {modifier.type === "steelman"
-            ? "Reveal the steelman"
+          {isWrittenChallenge
+            ? modifier.type === "steelman"
+              ? "Reveal the steelman"
+              : "Reveal the opposing case"
             : "Reveal what moved"}
         </button>
       ) : (
@@ -1481,7 +1514,9 @@ function Reveal({
     ? room.round_number === room.round_count
       ? "See the final table"
       : "Next round"
-    : room.modifier?.type === "steelman"
+    : room.modifier?.type === "devils_advocate"
+      ? "Make the opposing case"
+      : room.modifier?.type === "steelman"
       ? "Begin the steelman"
       : room.modifier?.type === "change_my_mind"
         ? "Poll the room again"
@@ -1550,11 +1585,24 @@ function RevealModifierCard({ room }: { room: RoomView }) {
   if (!modifier) return null;
 
   if (modifier.type === "devils_advocate") {
+    const result = modifier.results?.[0];
     return (
       <article className="reveal-modifier devil-card">
         <span className="modifier-badge">DEVIL'S ADVOCATE</span>
-        <h2>{modifier.target_player_name}, the wheel chose you.</h2>
-        <p>{modifier.instructions}</p>
+        {room.phase === "follow_up_reveal" && result ? (
+          <>
+            <h2>{modifier.target_player_name}'s opposing case</h2>
+            <blockquote>{String(result.value)}</blockquote>
+          </>
+        ) : (
+          <>
+            <h2>{modifier.target_player_name}, the wheel chose you.</h2>
+            <p>
+              Discuss the question first. Then write the strongest good-faith
+              case against your own position.
+            </p>
+          </>
+        )}
       </article>
     );
   }
