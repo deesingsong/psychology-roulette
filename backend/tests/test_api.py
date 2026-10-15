@@ -1,5 +1,6 @@
 import secrets
 
+import pytest
 from fastapi.testclient import TestClient
 
 from psychology_roulette.ai import AIInvalidOutput, AIServiceUnavailable, GameContent
@@ -59,6 +60,59 @@ def test_rooms_use_code_only_joining_and_do_not_expose_invites() -> None:
     )
     assert joined.status_code == 201
     assert joined.json()["player_name"] == "Guest"
+
+
+def test_maintenance_mode_blocks_database_api_without_touching_store() -> None:
+    class StoreMustNotBeAccessed:
+        def __getattr__(self, name: str):
+            raise AssertionError(f"maintenance request accessed store method {name}")
+
+    client = TestClient(
+        create_app(StoreMustNotBeAccessed(), maintenance_mode=True)  # type: ignore[arg-type]
+    )
+
+    room_response = client.get(
+        "/api/rooms/ABCD",
+        headers=_auth(_new_access_token()),
+    )
+    assert room_response.status_code == 503
+    assert room_response.json() == {
+        "detail": "The game is temporarily unavailable while maintenance is in progress.",
+        "code": "maintenance",
+    }
+    assert room_response.headers["retry-after"] == "60"
+    assert room_response.headers["cache-control"] == "no-store"
+
+    create_response = client.post(
+        "/api/rooms",
+        headers=_auth(_new_access_token()),
+        json={"host_name": "Host"},
+    )
+    assert create_response.status_code == 503
+    assert create_response.headers["cache-control"] == "no-store"
+
+    health_response = client.get("/api/health")
+    assert health_response.status_code == 200
+    assert health_response.json() == {"status": "ok"}
+
+
+def test_maintenance_mode_reads_environment(monkeypatch) -> None:
+    monkeypatch.setenv("PSYCHOLOGY_ROULETTE_MAINTENANCE_MODE", " yes ")
+    client = TestClient(create_app(RoomStore()))
+
+    response = client.get(
+        "/api/session",
+        headers=_auth(_new_access_token()),
+    )
+
+    assert response.status_code == 503
+
+
+def test_maintenance_mode_rejects_unrecognized_environment_value(monkeypatch) -> None:
+    monkeypatch.setenv("PSYCHOLOGY_ROULETTE_MAINTENANCE_MODE", "enabled-ish")
+
+    with pytest.raises(ValueError, match="must be a boolean value"):
+        create_app(RoomStore())
 
 
 def test_create_and_join_entry_limits_return_retry_after() -> None:

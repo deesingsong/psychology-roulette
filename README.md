@@ -108,25 +108,29 @@ uv run ruff check .
 
 See [docs/GAME_SPEC.md](docs/GAME_SPEC.md) for the current game rules and state-machine decisions.
 
-## Hosted deployment: Vercel + Supabase
+## Hosted deployment: Vercel + Neon
 
 The repository is ready to run as one Vercel Services project: Vite serves the web
 client, FastAPI handles `/api/*`, and every function instance shares the same
-Supabase Postgres data. `vercel.json` contains the service routing, and
+Neon Postgres data. `vercel.json` contains the service routing, and
 `backend/main.py` is the hosted API entrypoint.
 
-1. Create a Supabase project and run
-   `supabase/migrations/20260913000000_create_game_store.sql` in its SQL editor.
-   If the project was created from an earlier version of that migration, also run
-   `supabase/migrations/20260914000000_remove_private_invites.sql`.
-2. Copy the transaction-pooler connection string from **Connect** in Supabase.
-   Append `?sslmode=require` if the copied URL does not already specify SSL.
+1. Create a Neon project and use its direct (non-pooled) connection string for
+   schema migrations and one-time data imports. The app does not use Neon Auth,
+   Realtime, or Storage; room state and reconnect sessions remain in Postgres.
+2. Run `database/schema.sql` as the database owner. Create a separate SQL-managed
+   `psychology_roulette_runtime` login role with `NOINHERIT`, `NOSUPERUSER`,
+   `NOCREATEDB`, `NOCREATEROLE`, `NOREPLICATION`, and `NOBYPASSRLS`. Set its
+   password using Neon role management, then apply
+   `database/neon_permissions.sql`; do not give the application owner credentials.
+   Keep schema ownership, role creation, and migration credentials separate from
+   the runtime user where practical.
 3. Import this GitHub repository into Vercel and choose **Services** as the
    Framework Preset.
 4. Add these Vercel environment variables:
 
    ```text
-   PSYCHOLOGY_ROULETTE_DATABASE_URL=<Supabase transaction-pooler URL>
+   PSYCHOLOGY_ROULETTE_DATABASE_URL=<Neon pooled runtime URL for psychology_roulette_runtime>
    PSYCHOLOGY_ROULETTE_ROOM_TTL_SECONDS=604800
    PSYCHOLOGY_ROULETTE_AI_BASE_URL=<Cloudflare Worker HTTPS URL, optional>
    PSYCHOLOGY_ROULETTE_AI_TOKEN=<Oracle gateway secret, required with AI URL>
@@ -137,15 +141,64 @@ Supabase Postgres data. `vercel.json` contains the service routing, and
    launcher or always-on laptop is involved.
 
 The database URL is a server-only secret and must never use a `VITE_` prefix or be
-placed in frontend code. The adapter disables prepared statements and limits each
-warm function instance to one pooled connection, which matches Supabase's
-transaction-pooler guidance for serverless traffic. Postgres row locks serialize
-concurrent changes to a room, so separate Vercel instances cannot overwrite each
-other's answers or joins.
+placed in frontend code. Use Neon’s pooled endpoint for Vercel serverless traffic
+and its direct endpoint for migrations. The adapter disables prepared statements
+and limits each warm function instance to one pooled connection. Postgres row locks
+serialize concurrent changes to a room, so separate Vercel instances cannot
+overwrite each other's answers or joins.
 
 Vercel's dynamic outbound addresses do not affect this database connection because
-the Supabase transaction pooler is a credential-authenticated public endpoint, not
-an Oracle IP allowlist.
+Neon's pooled endpoint is a credential-authenticated public endpoint, not an
+Oracle IP allowlist. For Supabase-to-Neon migration, first produce and protect a
+snapshot using `database/export_snapshot.sql`, verify the destination schema,
+then import with `PSYCHOLOGY_ROULETTE_MIGRATION_DATABASE_URL` set to Neon's direct
+connection string and `python scripts/import_snapshot.py --file <protected-file>`.
+The importer accepts only its exact snapshot format, requires an empty target, and
+wraps inserts in a single transaction. Keep the source Supabase project intact
+until the Neon deployment has been verified and you have separately decided to
+retire it.
+
+### Supabase-to-Neon cutover procedure
+
+Treat the snapshot as sensitive: it contains room state and hashed reconnect
+tokens. Keep it outside Git (the `.migration/` directory is ignored), never paste
+it into chat, and remove it when the migration is verified. The export and transfer
+helpers create files exclusively; on Windows they remove inherited ACLs and grant
+access only to the current account, SYSTEM, and local Administrators. A rehearsal
+import is not a substitute for a fresh source snapshot. The importer intentionally
+refuses a non-empty destination; do not clear an existing Neon branch without
+first confirming it is only disposable rehearsal data and making a backup if
+needed.
+
+1. Confirm the Supabase source can be read and the Neon runtime role has only the
+   required table permissions. Use a separate Neon pooled connection for Vercel
+   and direct connection for export/import or schema work.
+2. Point Vercel Preview at the Neon verification branch and test room creation,
+   join, read, answer, end-room, and persistence across requests. Do not test
+   against the production Neon branch.
+3. For the production data freeze, deploy with
+   `PSYCHOLOGY_ROULETTE_MAINTENANCE_MODE=true`. The API returns 503 for all
+   database-backed routes (including reads, which can prune expired rooms); the
+   database-independent `/api/health` endpoint remains available. Confirm the
+   maintenance deployment is serving before exporting.
+4. Drain in-flight requests and confirm no other writers remain. This flag only
+   protects the deployment that contains it: if users have been given older
+   immutable Vercel deployment URLs, ensure those URLs cannot continue writing
+   before taking the final snapshot.
+5. Export one fresh source snapshot, securely copy it to the chosen empty Neon
+   production target, import it once, then run `database/verify.sql` and compare
+   all three table counts. Preserve the source unchanged; once Neon accepts new
+   writes, a connection-string flip back to Supabase would lose those writes and
+   would require a reverse reconciliation.
+6. Set the Vercel Production database secret to the Neon main branch's pooled
+   runtime URL and deploy the verified app. Keep maintenance enabled until the
+   final production build is ready; then disable maintenance in a new deployment
+   and verify the public room flow and persistence. Keep Supabase as a frozen
+   source copy until you explicitly decide its future.
+
+Changing a Vercel environment variable does not change existing deployments;
+each environment change needs a new deployment. Never retrieve, print, or commit
+the current production database URL to perform the switch.
 
 The Oracle deployment lives in `oracle/`. It runs the official ARM64 llama.cpp server
 with Qwen3 0.6B Q8_0 behind a narrow authenticated gateway. The model has explicit

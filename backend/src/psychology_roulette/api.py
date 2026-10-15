@@ -403,6 +403,18 @@ def room_view(room: Room) -> RoomView:
 
 
 CONTENT_GENERATION_STALE_SECONDS = 90
+MAINTENANCE_ENV_VAR = "PSYCHOLOGY_ROULETTE_MAINTENANCE_MODE"
+
+
+def _maintenance_mode_from_environment() -> bool:
+    value = os.getenv(MAINTENANCE_ENV_VAR, "").strip().casefold()
+    if not value:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{MAINTENANCE_ENV_VAR} must be a boolean value.")
 
 
 def _begin_content_generation(room: Room, player_id: str, started_at: float) -> None:
@@ -475,6 +487,7 @@ def create_app(
     *,
     entry_rate_limits: EntryRateLimits | None = None,
     ai_provider: AIProvider | None = None,
+    maintenance_mode: bool | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Are You Niche or NPC? API",
@@ -491,6 +504,11 @@ def create_app(
     active_store = store if store is not None else default_store
     active_rate_limits = entry_rate_limits or EntryRateLimits.from_environment()
     active_ai_provider = ai_provider if ai_provider is not None else configured_ai_provider()
+    maintenance_enabled = (
+        _maintenance_mode_from_environment()
+        if maintenance_mode is None
+        else maintenance_mode
+    )
 
     def enforce_entry_limit(request: Request, action: str) -> None:
         client_host = request.client.host if request.client else "unknown"
@@ -515,7 +533,26 @@ def create_app(
 
     @app.middleware("http")
     async def prevent_session_caching(request: Request, call_next):
-        response = await call_next(request)
+        path = request.url.path
+        is_database_api = path.startswith("/api/") and path != "/api/health"
+        if (
+            maintenance_enabled
+            and is_database_api
+            and request.method.upper() != "OPTIONS"
+        ):
+            response = JSONResponse(
+                status_code=503,
+                content={
+                    "detail": (
+                        "The game is temporarily unavailable while maintenance "
+                        "is in progress."
+                    ),
+                    "code": "maintenance",
+                },
+                headers={"Retry-After": "60"},
+            )
+        else:
+            response = await call_next(request)
         if request.url.path == "/api/session" or request.url.path.startswith("/api/rooms"):
             response.headers["Cache-Control"] = "no-store"
         return response

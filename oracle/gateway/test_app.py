@@ -1,8 +1,7 @@
 import json
 
-from fastapi.testclient import TestClient
-
 import app as gateway
+from fastapi.testclient import TestClient
 
 
 def _content_request(count: int = 6) -> dict:

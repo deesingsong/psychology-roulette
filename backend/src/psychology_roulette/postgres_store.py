@@ -43,8 +43,8 @@ class PostgresRoomStore:
         if room_ttl_seconds is not None and room_ttl_seconds < 1:
             raise ValueError("room_ttl_seconds must be positive or None.")
         self.room_ttl_seconds = room_ttl_seconds
-        # Supabase's transaction pooler is intended for temporary/serverless clients.
-        # One connection per warm function instance prevents a connection fan-out.
+        # Neon pooling is intended for temporary/serverless clients. One connection
+        # per warm function instance prevents a connection fan-out.
         self._pool = ConnectionPool(
             conninfo=database_url,
             min_size=0,
